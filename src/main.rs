@@ -1,13 +1,19 @@
 use std::time::Duration;
 
 use bounce::{DrawActor, DrawMode, TextureStorage, World, sample_item};
+use glam::{Vec4, Vec4Swizzles};
 use metaphysics::numerical::Solver;
-use rand::{SeedableRng, rngs::SmallRng};
+use rand::{Rng, SeedableRng, rngs::SmallRng};
+use rand_distr::Uniform;
 use wgame::{
-    Library, Window,
+    Event, Library, Window,
     app::time::Instant,
     gfx::types::{Color, color},
     glam::{Affine2, Vec2},
+    input::{
+        event::{ElementState, MouseButton},
+        keyboard::{KeyCode, PhysicalKey},
+    },
     prelude::*,
     shapes::ShapeExt,
     typography::TextAlign,
@@ -30,8 +36,12 @@ async fn main(mut window: Window<'_>) {
     let mut toy_box: Option<World> = None;
     let mut mode = DrawMode::Normal;
 
+    let mut events = window.input();
+    let mut mouse_pos = Vec2::ZERO;
+    let mut mouse_down = false;
+
     let mut time = Instant::now();
-    while let Some(mut frame) = window.next_frame().await.unwrap() {
+    'frame_loop: while let Some(mut frame) = window.next_frame().await.unwrap() {
         if let Some((width, height)) = frame.resized() {
             viewport = Vec2::new(width as f32, height as f32);
             toy_box = Some(match toy_box.take() {
@@ -51,16 +61,85 @@ async fn main(mut window: Window<'_>) {
             // let raster = font_raster.insert(font.rasterize(height as f32 / 10.0));
             // text = Some(raster.text("Hello, World!"));
         }
+
         let toy_box = toy_box.as_mut().unwrap();
+        let camera = frame
+            .physical_camera()
+            .transform(Affine2::from_scale_angle_translation(
+                Vec2::splat(0.5 * scale),
+                0.0,
+                0.5 * viewport,
+            ));
+
+        while let Some(event) = events.try_next() {
+            match event {
+                Event::KeyboardInput { event, .. } => {
+                    if event.state.is_pressed()
+                        && !event.repeat
+                        && let PhysicalKey::Code(key) = event.physical_key
+                    {
+                        match key {
+                            KeyCode::Escape => break 'frame_loop,
+                            KeyCode::Equal | KeyCode::NumpadAdd => {
+                                toy_box.insert_item(sample_item(
+                                    &mut rng,
+                                    toy_box.size(),
+                                    &textures,
+                                ));
+                            }
+                            KeyCode::Minus | KeyCode::NumpadSubtract => {
+                                if toy_box.n_items() != 0 {
+                                    toy_box.remove_item(
+                                        rng.sample(Uniform::new(0, toy_box.n_items()).unwrap()),
+                                    );
+                                }
+                            }
+                            KeyCode::Backslash => {
+                                mode = match mode {
+                                    DrawMode::Normal => DrawMode::Debug,
+                                    DrawMode::Debug => DrawMode::Normal,
+                                }
+                            }
+                            _ => (),
+                        }
+                    }
+                }
+                Event::MouseInput { state, button, .. } => match (state, button) {
+                    (ElementState::Pressed, MouseButton::Left) => {
+                        mouse_down = true;
+                        toy_box.drag_acquire(mouse_pos);
+                    }
+                    (ElementState::Released, MouseButton::Left) => {
+                        mouse_down = false;
+                        toy_box.drag_release();
+                    }
+                    _ => (),
+                },
+                Event::CursorMoved { position, .. } => {
+                    let world_pos = camera.logical_to_world(Vec4::new(
+                        2.0 * position.x as f32 / viewport.x - 1.0,
+                        1.0 - 2.0 * position.y as f32 / viewport.y,
+                        0.0,
+                        1.0,
+                    ));
+                    mouse_pos = world_pos.xy();
+
+                    if mouse_down {
+                        toy_box.drag_move(mouse_pos);
+                    }
+                }
+                Event::CursorLeft { .. } => {
+                    mouse_down = false;
+                }
+                _ => (),
+            }
+        }
 
         frame.clear(match mode {
             DrawMode::Normal => color::BLACK.mix(color::WHITE, 0.5),
             DrawMode::Debug => color::BLACK.to_rgba(),
         });
 
-        let camera = frame
-            .physical_camera()
-            .transform(Affine2::from_scale(Vec2::splat(scale)));
         let mut scene = frame.scene();
         scene.camera = camera;
 
@@ -99,43 +178,3 @@ async fn main(mut window: Window<'_>) {
         }
     }
 }
-/*
-pub async fn main() {
-    while !is_key_down(KeyCode::Escape) {
-        {
-            if is_key_pressed(KeyCode::Equal) || is_key_pressed(KeyCode::KpAdd) {
-                toy_box.insert_item(sample_item(&mut rng, toy_box.size, &textures));
-            }
-            if toy_box.n_items() != 0
-                && (is_key_pressed(KeyCode::Minus) || is_key_pressed(KeyCode::KpSubtract))
-            {
-                toy_box.remove_item(rng.sample(Uniform::new(0, toy_box.n_items())));
-            }
-
-            let mouse_pos = camera.screen_to_world(Vec2::from(mouse_position()));
-            if is_mouse_button_pressed(MouseButton::Left) {
-                toy_box.drag_acquire(mouse_pos);
-            }
-            if is_mouse_button_released(MouseButton::Left) {
-                toy_box.drag_release();
-            }
-            if is_mouse_button_down(MouseButton::Left) {
-                toy_box.drag_move(mouse_pos);
-            } else {
-                toy_box.drag_release();
-            }
-
-            if is_key_pressed(KeyCode::Backslash) {
-                mode = match mode {
-                    DrawMode::Normal => DrawMode::Debug,
-                    DrawMode::Debug => DrawMode::Normal,
-                }
-            }
-        }
-
-        next_frame().await
-    }
-
-    Ok(())
-}
-*/

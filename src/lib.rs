@@ -17,7 +17,7 @@ use wgame::{
         types::{Color, color},
     },
     image::Image,
-    prelude::Transformable,
+    prelude::{Colorable, Transformable},
     shapes::ShapeExt,
     texture::{Texture, TextureSettings},
 };
@@ -59,7 +59,8 @@ impl Item {
                             self.rot.angle(),
                             *self.pos,
                         ))
-                        .with_texture(&self.texture),
+                        .with_texture(&self.texture)
+                        .mul_color(self.color),
                 );
             }
             DrawMode::Debug => match &self.shape {
@@ -161,6 +162,14 @@ impl World {
             DrawMode::Normal => {
                 let thickness = 2.0 * WALL_OFFSET * self.size.max_element();
                 let wall_size = wall_size + 0.5 * thickness;
+                scene.add(
+                    &lib.shapes()
+                        .rectangle((
+                            -wall_size + Vec2::splat(thickness),
+                            wall_size - Vec2::splat(thickness),
+                        ))
+                        .with_color(color::WHITE),
+                );
                 /*
                 draw_rectangle_lines(
                     -wall_size.x,
