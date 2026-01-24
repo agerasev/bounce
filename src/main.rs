@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bounce::{DrawActor, DrawMode, TextureStorage, World, sample_item};
 use glam::{Vec4, Vec4Swizzles};
-use metaphysics::numerical::Solver;
+use metaphysics::{Rk4, Solver};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rand_distr::Uniform;
 use wgame::{
@@ -33,7 +33,7 @@ async fn main(mut window: Window<'_>) {
     let mut viewport = Vec2::ZERO;
     let scale = 640.0;
 
-    let mut toy_box: Option<World> = None;
+    let mut toy_box: Option<World<Rk4>> = None;
     let mut mode = DrawMode::Normal;
 
     let mut events = window.input();
@@ -150,7 +150,7 @@ async fn main(mut window: Window<'_>) {
             let dt = frame_time
                 .min(Duration::from_millis(40))
                 .div_f32(if mode == DrawMode::Debug { 10.0 } else { 1.0 });
-            Solver.solve_step(toy_box, dt.as_secs_f32());
+            Rk4.solve_step(toy_box, dt.as_secs_f32());
         }
 
         {

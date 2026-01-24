@@ -3,11 +3,7 @@ use super::{
     geometry::{intersect_circle_and_plane, intersect_circles},
 };
 use glam::Vec2;
-use metaphysics::{
-    algebra::Rot2,
-    numerical::{System, Var, Visitor},
-    physics::{angular_to_linear2, torque2},
-};
+use metaphysics::{Rot2, Solver, System, Var, Visitor, angular_to_linear2, torque2};
 
 /// Mass factor
 pub const MASF: f32 = 1.0;
@@ -50,42 +46,41 @@ impl Shape {
     }
 }
 
-pub trait Actor {
+pub trait Actor<S: Solver> {
     /// Apply force to the specific point of the body.
-    fn apply(&mut self, body: &mut Body, pos: Vec2, force: Vec2);
+    fn apply(&mut self, body: &mut Body<S>, pos: Vec2, force: Vec2);
 }
 
 struct DerivActor;
-impl Actor for DerivActor {
-    fn apply(&mut self, body: &mut Body, pos: Vec2, force: Vec2) {
-        body.vel.add_deriv(force / body.mass);
-        body.asp
-            .add_deriv(torque2(pos - *body.pos, force) / body.inm);
+impl<S: Solver> Actor<S> for DerivActor {
+    fn apply(&mut self, body: &mut Body<S>, pos: Vec2, force: Vec2) {
+        body.vel.deriv += force / body.mass;
+        body.asp.deriv += torque2(pos - *body.pos, force) / body.inm;
     }
 }
 
 /// Rigid body
-#[derive(Clone, Default, Debug)]
-pub struct Body {
+#[derive(Clone, Default)]
+pub struct Body<S: Solver> {
     pub mass: f32,
-    pub pos: Var<Vec2>,
-    pub vel: Var<Vec2>,
+    pub pos: Var<Vec2, S>,
+    pub vel: Var<Vec2, S>,
 
     /// Moment of inertia
     pub inm: f32,
     /// Rotation.
-    pub rot: Var<Rot2>,
+    pub rot: Var<Rot2, S>,
     /// Angular speed.
-    pub asp: Var<f32>,
+    pub asp: Var<f32, S>,
 }
 
-impl Body {
+impl<S: Solver> Body<S> {
     fn vel_at(&self, p: Vec2) -> Vec2 {
         *self.vel + angular_to_linear2(*self.asp, p - *self.pos)
     }
 
     /// Influence item by directed deformation `def` at point of contact `pos` moving with velocity `vel`.
-    pub fn contact(&mut self, actor: &mut impl Actor, def: Vec2, pos: Vec2, vel: Vec2) {
+    pub fn contact(&mut self, actor: &mut impl Actor<S>, def: Vec2, pos: Vec2, vel: Vec2) {
         let vel = self.vel_at(pos) - vel;
 
         let norm = def.normalize_or_zero();
@@ -103,7 +98,7 @@ impl Body {
     }
 
     /// Pin `loc_pos` point in local item coordinates to `target` point in world space.
-    pub fn attract(&mut self, actor: &mut impl Actor, target: Vec2, self_pos: Vec2) {
+    pub fn attract(&mut self, actor: &mut impl Actor<S>, target: Vec2, self_pos: Vec2) {
         let loc_pos = self.rot.transform(self_pos);
         let rel_pos = target - (*self.pos + loc_pos);
         let vel = *self.vel + angular_to_linear2(*self.asp, loc_pos);
@@ -119,7 +114,12 @@ impl Body {
     }
 }
 
-fn contact_wall(actor: &mut impl Actor, item: &mut Item, offset: f32, normal: Vec2) {
+fn contact_wall<S: Solver>(
+    actor: &mut impl Actor<S>,
+    item: &mut Item<S>,
+    offset: f32,
+    normal: Vec2,
+) {
     if let Some((area, barycenter)) =
         intersect_circle_and_plane(*item.pos, item.shape.radius(), offset, normal)
     {
@@ -131,21 +131,21 @@ fn contact_wall(actor: &mut impl Actor, item: &mut Item, offset: f32, normal: Ve
 /// Wall offset factor
 pub const WALL_OFFSET: f32 = 0.04;
 
-impl World {
-    pub fn compute_derivs_ext(&mut self, actor: &mut impl Actor) {
+impl<S: Solver> World<S> {
+    pub fn compute_derivs_ext(&mut self, actor: &mut impl Actor<S>) {
         for item in self.items.iter_mut() {
             let radius = item.shape.radius();
             let body = &mut item.body;
 
-            body.pos.add_deriv(*body.vel);
-            body.rot.add_deriv(*body.asp);
+            body.pos.deriv += *body.vel;
+            body.rot.deriv += *body.asp;
 
             // Gravity
             actor.apply(body, *body.pos, GRAV * body.mass);
 
             // Air resistance
-            body.vel.add_deriv(-(AIRF * radius / body.mass) * *body.vel);
-            body.asp.add_deriv(-(AIRF * radius / body.inm) * *body.asp);
+            body.vel.deriv += -(AIRF * radius / body.mass) * *body.vel;
+            body.asp.deriv += -(AIRF * radius / body.inm) * *body.asp;
 
             // Walls
             let wall_size = self.size - WALL_OFFSET * self.size.min_element();
@@ -180,11 +180,11 @@ impl World {
     }
 }
 
-impl System for World {
+impl<S: Solver> System<S> for World<S> {
     fn compute_derivs(&mut self, _dt: f32) {
         self.compute_derivs_ext(&mut DerivActor);
     }
-    fn visit_vars<V: Visitor>(&mut self, visitor: &mut V) {
+    fn visit_vars<V: Visitor<Solver = S>>(&mut self, visitor: &mut V) {
         for ent in &mut self.items {
             visitor.apply(&mut ent.pos);
             visitor.apply(&mut ent.vel);

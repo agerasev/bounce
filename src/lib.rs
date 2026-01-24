@@ -5,7 +5,7 @@ use crate::physics::{Actor, Body, Shape, WALL_OFFSET};
 use derive_more::derive::{Deref, DerefMut};
 use glam::{Affine2, Vec2, Vec4, Vec4Swizzles};
 use hsl::HSL;
-use metaphysics::{algebra::Rot2, numerical::Var};
+use metaphysics::{Rot2, Solver, Var};
 use rand::Rng;
 use rand_distr::Uniform;
 use rgb::Rgb;
@@ -32,18 +32,18 @@ pub enum DrawMode {
 /// Drawing border thickness factor
 const BORDERX: f32 = 1.0 / 24.0;
 
-#[derive(Clone, Debug, Deref, DerefMut)]
-pub struct Item {
+#[derive(Clone, Deref, DerefMut)]
+pub struct Item<S: Solver> {
     #[deref]
     #[deref_mut]
-    pub body: Body,
+    pub body: Body<S>,
     pub shape: Shape,
 
     pub texture: Texture,
     pub color: Rgb<f32>,
 }
 
-impl Item {
+impl<S: Solver> Item<S> {
     pub fn draw(&self, lib: &Library, scene: &mut Scene, mode: DrawMode) {
         let size = match &self.shape {
             Shape::Circle { radius } => Vec2::splat(*radius),
@@ -102,14 +102,14 @@ impl Item {
     }
 }
 
-pub struct World {
+pub struct World<S: Solver> {
     /// Half of world sides
     size: Vec2,
-    items: Vec<Item>,
+    items: Vec<Item<S>>,
     drag: Option<(usize, Vec2, Vec2)>,
 }
 
-impl World {
+impl<S: Solver> World<S> {
     pub fn new(size: Vec2) -> Self {
         Self {
             size,
@@ -145,11 +145,11 @@ impl World {
     pub fn n_items(&self) -> usize {
         self.items.len()
     }
-    pub fn remove_item(&mut self, i: usize) -> Item {
+    pub fn remove_item(&mut self, i: usize) -> Item<S> {
         self.drag = None;
         self.items.remove(i)
     }
-    pub fn insert_item(&mut self, item: Item) {
+    pub fn insert_item(&mut self, item: Item<S>) {
         self.items.push(item);
     }
 
@@ -200,7 +200,11 @@ impl World {
     }
 }
 
-pub fn sample_item(mut rng: impl Rng, box_size: Vec2, textures: &TextureStorage) -> Item {
+pub fn sample_item<S: Solver>(
+    mut rng: impl Rng,
+    box_size: Vec2,
+    textures: &TextureStorage,
+) -> Item<S> {
     let radius: f32 = rng.sample(Uniform::new(0.1, 0.3).unwrap());
     let mass = physics::MASF * radius;
     let eff_size = (box_size - Vec2::splat(radius)).max(Vec2::ZERO);
@@ -245,8 +249,8 @@ pub struct DrawActor<'a> {
     pub scene: &'a mut Scene,
 }
 
-impl Actor for DrawActor<'_> {
-    fn apply(&mut self, _: &mut Body, pos: Vec2, force: Vec2) {
+impl<S: Solver> Actor<S> for DrawActor<'_> {
+    fn apply(&mut self, _: &mut Body<S>, pos: Vec2, force: Vec2) {
         let fpos = pos + FORCEX * force;
         // Draw an arrow
         self.scene.add(

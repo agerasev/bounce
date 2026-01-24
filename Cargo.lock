@@ -1194,7 +1194,6 @@ checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
 name = "metaphysics"
 version = "0.2.0"
 dependencies = [
- "derive_more",
  "glam",
 ]
 
