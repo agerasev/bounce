@@ -1,0 +1,6 @@
+[submodule "wgame"]
+	path = wgame
+	url = ../wgame/
+[submodule "metaphysics"]
+	path = metaphysics
+	url = ../metaphysics/

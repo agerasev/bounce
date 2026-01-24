@@ -1,0 +1,18 @@
+[package]
+name = "bounce"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+approx = "0.5.1"
+derive_more = { version = "2.1.1", features = ["deref", "deref_mut"] }
+glam = { version = "0.31.0", features = ["rand"] }
+hsl = "0.1.1"
+metaphysics = { path = "metaphysics" }
+rand = { version = "0.9.2", default-features = false, features = [
+    "std",
+    "small_rng",
+] }
+rand_distr = "0.5.1"
+rgb = "0.8.52"
+wgame = { path = "wgame/wgame" }
