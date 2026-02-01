@@ -145,15 +145,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
-name = "approx"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -285,11 +276,11 @@ dependencies = [
 name = "bounce"
 version = "0.1.0"
 dependencies = [
- "approx",
  "derive_more",
  "glam",
  "hsl",
- "metaphysics",
+ "phy",
+ "phy-geom2",
  "rand",
  "rand_distr",
  "rgb",
@@ -856,6 +847,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74a4d85559e2637d3d839438b5b3d75c31e655276f9544d72475c36b92fabbed"
 dependencies = [
  "bytemuck",
+ "libm",
  "rand",
 ]
 
@@ -1183,13 +1175,6 @@ name = "memo-map"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
-
-[[package]]
-name = "metaphysics"
-version = "0.2.0"
-dependencies = [
- "glam",
-]
 
 [[package]]
 name = "minijinja"
@@ -1596,6 +1581,20 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "phy"
+version = "0.1.1"
+dependencies = [
+ "glam",
+]
+
+[[package]]
+name = "phy-geom2"
+version = "0.1.0"
+dependencies = [
+ "glam",
+]
 
 [[package]]
 name = "pin-project"
@@ -2592,6 +2591,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "derivative",
+ "derive_more",
  "glam",
  "half",
  "log",
@@ -2610,6 +2610,7 @@ name = "wgame-gfx-texture"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "derivative",
  "euclid",
  "glam",
  "half",

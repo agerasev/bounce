@@ -1,9 +1,7 @@
-use super::{
-    Item, World,
-    geometry::{intersect_circle_and_plane, intersect_circles},
-};
+use super::{Item, World};
 use glam::Vec2;
-use metaphysics::{Rot2, Solver, System, Var, Visitor, angular_to_linear2, torque2};
+use phy::{Rot2, Solver, System, Var, Visitor, angular_to_linear2, torque2};
+use phy_geom2::{Circle, HalfPlane, Intersect, Intersection};
 
 /// Mass factor
 pub const MASF: f32 = 1.0;
@@ -120,11 +118,14 @@ fn contact_wall<S: Solver>(
     offset: f32,
     normal: Vec2,
 ) {
-    if let Some((area, barycenter)) =
-        intersect_circle_and_plane(*item.pos, item.shape.radius(), offset, normal)
-    {
+    let intersection = Circle {
+        center: *item.pos,
+        radius: item.shape.radius(),
+    }
+    .intersect(&HalfPlane { normal, offset });
+    if let Some(Intersection { area, centroid }) = intersection {
         item.body
-            .contact(actor, normal * area.sqrt(), barycenter, Vec2::ZERO);
+            .contact(actor, normal * area.sqrt(), centroid, Vec2::ZERO);
     }
 }
 
@@ -159,16 +160,19 @@ impl<S: Solver> World<S> {
             let (left, other_items) = self.items.split_at_mut(i);
             let this = left.last_mut().unwrap();
             for other in other_items {
-                if let Some((area, barycenter)) = intersect_circles(
-                    *this.pos,
-                    this.shape.radius(),
-                    *other.pos,
-                    other.shape.radius(),
-                ) {
+                let intersection = Circle {
+                    center: *this.pos,
+                    radius: this.shape.radius(),
+                }
+                .intersect(&Circle {
+                    center: *other.pos,
+                    radius: other.shape.radius(),
+                });
+                if let Some(Intersection { area, centroid }) = intersection {
                     let dir = (*other.pos - *this.pos).normalize_or_zero();
                     let def = area.sqrt();
-                    this.contact(actor, -def * dir, barycenter, other.vel_at(barycenter));
-                    other.contact(actor, def * dir, barycenter, this.vel_at(barycenter));
+                    this.contact(actor, -def * dir, centroid, other.vel_at(centroid));
+                    other.contact(actor, def * dir, centroid, this.vel_at(centroid));
                 }
             }
         }

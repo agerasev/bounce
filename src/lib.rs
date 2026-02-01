@@ -1,11 +1,10 @@
-mod geometry;
 mod physics;
 
 use crate::physics::{Actor, Body, Shape, WALL_OFFSET};
 use derive_more::derive::{Deref, DerefMut};
 use glam::{Affine2, Vec2, Vec4, Vec4Swizzles};
 use hsl::HSL;
-use metaphysics::{Rot2, Solver, Var};
+use phy::{Rot2, Solver, Var};
 use rand::Rng;
 use rand_distr::Uniform;
 use rgb::Rgb;
@@ -17,8 +16,7 @@ use wgame::{
         types::{Color, color},
     },
     image::Image,
-    prelude::{Colorable, Transformable},
-    shapes::ShapeExt,
+    prelude::*,
     texture::{Texture, TextureSettings},
 };
 
@@ -45,9 +43,9 @@ pub struct Item<S: Solver> {
 
 impl<S: Solver> Item<S> {
     pub fn draw(&self, lib: &Library, scene: &mut Scene, mode: DrawMode) {
-        let size = match &self.shape {
-            Shape::Circle { radius } => Vec2::splat(*radius),
-            Shape::Rectangle { size } => *size,
+        let (size, order) = match &self.shape {
+            Shape::Circle { radius } => (Vec2::splat(*radius), 1),
+            Shape::Rectangle { size } => (*size, 0),
         };
         match mode {
             DrawMode::Normal => {
@@ -59,8 +57,9 @@ impl<S: Solver> Item<S> {
                             self.rot.angle(),
                             *self.pos,
                         ))
-                        .with_texture(&self.texture)
-                        .mul_color(self.color),
+                        .fill_texture(&self.texture)
+                        .multiply_color(self.color)
+                        .order(order),
                 );
             }
             DrawMode::Debug => match &self.shape {
@@ -168,7 +167,8 @@ impl<S: Solver> World<S> {
                             -wall_size + Vec2::splat(thickness),
                             wall_size - Vec2::splat(thickness),
                         ))
-                        .with_color(color::WHITE),
+                        .fill_color(color::WHITE)
+                        .order(-1000),
                 );
                 /*
                 draw_rectangle_lines(
@@ -262,7 +262,7 @@ impl<S: Solver> Actor<S> for DrawActor<'_> {
                     pos - BORDERX * FORCEX * force.perp(),
                     pos + BORDERX * FORCEX * force.perp(),
                 )
-                .with_color(color::WHITE),
+                .fill_color(color::WHITE),
         );
     }
 }

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bounce::{DrawActor, DrawMode, TextureStorage, World, sample_item};
 use glam::{Vec4, Vec4Swizzles};
-use metaphysics::{Rk4, Solver};
+use phy::{Rk4, Solver};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rand_distr::Uniform;
 use wgame::{
@@ -15,7 +15,6 @@ use wgame::{
         keyboard::{KeyCode, PhysicalKey},
     },
     prelude::*,
-    shapes::ShapeExt,
     typography::TextAlign,
 };
 
