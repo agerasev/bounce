@@ -1,6 +1,9 @@
 [submodule "wgame"]
 	path = wgame
 	url = ../wgame/
-[submodule "metaphysics"]
-	path = metaphysics
-	url = ../metaphysics/
+[submodule "phy"]
+	path = phy
+	url = ../phy
+[submodule "geom2"]
+	path = geom2
+	url = ../geom2

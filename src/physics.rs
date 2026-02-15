@@ -1,7 +1,7 @@
 use super::{Item, World};
+use geom2::{Circle, Disk, HalfPlane, Integrable, Intersect, Moment};
 use glam::Vec2;
 use phy::{Rot2, Solver, System, Var, Visitor, angular_to_linear2, torque2};
-use phy_geom2::{Circle, HalfPlane, Intersect, Intersection};
 
 /// Mass factor
 pub const MASF: f32 = 1.0;
@@ -118,12 +118,12 @@ fn contact_wall<S: Solver>(
     offset: f32,
     normal: Vec2,
 ) {
-    let intersection = Circle {
+    let intersection = Disk(Circle {
         center: *item.pos,
         radius: item.shape.radius(),
-    }
+    })
     .intersect(&HalfPlane { normal, offset });
-    if let Some(Intersection { area, centroid }) = intersection {
+    if let Some(Moment { area, centroid }) = intersection.map(|x| x.moment()) {
         item.body
             .contact(actor, normal * area.sqrt(), centroid, Vec2::ZERO);
     }
@@ -160,15 +160,15 @@ impl<S: Solver> World<S> {
             let (left, other_items) = self.items.split_at_mut(i);
             let this = left.last_mut().unwrap();
             for other in other_items {
-                let intersection = Circle {
+                let intersection = Disk(Circle {
                     center: *this.pos,
                     radius: this.shape.radius(),
-                }
-                .intersect(&Circle {
+                })
+                .intersect(&Disk(Circle {
                     center: *other.pos,
                     radius: other.shape.radius(),
-                });
-                if let Some(Intersection { area, centroid }) = intersection {
+                }));
+                if let Some(Moment { area, centroid }) = intersection.map(|x| x.moment()) {
                     let dir = (*other.pos - *this.pos).normalize_or_zero();
                     let def = area.sqrt();
                     this.contact(actor, -def * dir, centroid, other.vel_at(centroid));
@@ -185,10 +185,10 @@ impl<S: Solver> World<S> {
 }
 
 impl<S: Solver> System<S> for World<S> {
-    fn compute_derivs(&mut self, _dt: f32) {
+    fn compute_derivs(&mut self, _: &S::Context) {
         self.compute_derivs_ext(&mut DerivActor);
     }
-    fn visit_vars<V: Visitor<Solver = S>>(&mut self, visitor: &mut V) {
+    fn visit_vars<V: Visitor<S>>(&mut self, visitor: &mut V) {
         for ent in &mut self.items {
             visitor.apply(&mut ent.pos);
             visitor.apply(&mut ent.vel);

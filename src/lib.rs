@@ -164,8 +164,8 @@ impl<S: Solver> World<S> {
                 scene.add(
                     &lib.shapes()
                         .rectangle((
-                            -wall_size + Vec2::splat(thickness),
-                            wall_size - Vec2::splat(thickness),
+                            -wall_size + Vec2::splat(0.5 * thickness),
+                            wall_size - Vec2::splat(0.5 * thickness),
                         ))
                         .fill_color(color::WHITE)
                         .order(-1000),
