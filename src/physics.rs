@@ -1,7 +1,14 @@
 use super::{Item, World};
-use geom2::{Circle, Disk, HalfPlane, Integrable, Intersect, Moment};
+use either::Either;
+use geom2::{
+    ArcPolygon, ArcVertex, Circle, Disk, HalfPlane, Integrable, Intersect, IntersectTo, Moment,
+    Polygon,
+};
 use glam::Vec2;
 use phy::{Rot2, Solver, System, Var, Visitor, angular_to_linear2, torque2};
+use smallvec::SmallVec;
+
+const AREA_EPS: f32 = 0.0;
 
 /// Mass factor
 pub const MASF: f32 = 1.0;
@@ -40,6 +47,26 @@ impl Shape {
         match self {
             Shape::Circle { radius } => *radius,
             Shape::Rectangle { size } => size.min_element(),
+        }
+    }
+}
+
+impl<S: Solver> Item<S> {
+    pub fn geometry(&self) -> Either<Disk, Polygon<SmallVec<[Vec2; 4]>>> {
+        match self.shape {
+            Shape::Circle { radius } => Either::Left(Disk(Circle {
+                center: *self.pos,
+                radius,
+            })),
+            Shape::Rectangle { size } => {
+                let vertex = Vec2::from_angle(self.rot.angle()).rotate(size);
+                Either::Right(Polygon::<SmallVec<[Vec2; 4]>>::new(SmallVec::from([
+                    *self.pos - vertex,
+                    *self.pos - vertex.perp(),
+                    *self.pos + vertex,
+                    *self.pos + vertex.perp(),
+                ])))
+            }
         }
     }
 }
@@ -118,12 +145,16 @@ fn contact_wall<S: Solver>(
     offset: f32,
     normal: Vec2,
 ) {
-    let intersection = Disk(Circle {
-        center: *item.pos,
-        radius: item.shape.radius(),
-    })
-    .intersect(&HalfPlane { normal, offset });
-    if let Some(Moment { area, centroid }) = intersection.map(|x| x.moment()) {
+    let wall = HalfPlane { normal, offset };
+    let intersection = match item.geometry() {
+        Either::Left(left) => left.intersect(&wall).map(|x| x.moment()),
+        Either::Right(right) => right
+            .intersect_to(&wall)
+            .map(|x: Polygon<SmallVec<[Vec2; 5]>>| x.moment()),
+    };
+    if let Some(Moment { area, centroid }) = intersection
+        && area > AREA_EPS
+    {
         item.body
             .contact(actor, normal * area.sqrt(), centroid, Vec2::ZERO);
     }
@@ -160,15 +191,26 @@ impl<S: Solver> World<S> {
             let (left, other_items) = self.items.split_at_mut(i);
             let this = left.last_mut().unwrap();
             for other in other_items {
-                let intersection = Disk(Circle {
-                    center: *this.pos,
-                    radius: this.shape.radius(),
-                })
-                .intersect(&Disk(Circle {
-                    center: *other.pos,
-                    radius: other.shape.radius(),
-                }));
-                if let Some(Moment { area, centroid }) = intersection.map(|x| x.moment()) {
+                let intersection = match this.geometry() {
+                    Either::Left(sc) => match other.geometry() {
+                        Either::Left(oc) => sc.intersect(&oc).map(|x| x.moment()),
+                        Either::Right(op) => sc
+                            .intersect_to(&op)
+                            .map(|x: ArcPolygon<SmallVec<[ArcVertex; 6]>>| x.moment()),
+                    },
+                    Either::Right(sp) => match other.geometry() {
+                        Either::Left(oc) => sp
+                            .intersect_to(&oc)
+                            .map(|x: ArcPolygon<SmallVec<[ArcVertex; 6]>>| x.moment()),
+                        Either::Right(op) => sp
+                            .intersect_to(&op)
+                            .map(|x: Polygon<SmallVec<[Vec2; 8]>>| x.moment()),
+                    },
+                };
+
+                if let Some(Moment { area, centroid }) = intersection
+                    && area > AREA_EPS
+                {
                     let dir = (*other.pos - *this.pos).normalize_or_zero();
                     let def = area.sqrt();
                     this.contact(actor, -def * dir, centroid, other.vel_at(centroid));

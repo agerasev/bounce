@@ -15,4 +15,6 @@ rand = { version = "0.9.2", default-features = false, features = [
 ] }
 rand_distr = "0.5.1"
 rgb = "0.8.52"
+smallvec = { version = "1.15.1", default-features = false }
 wgame = { path = "wgame/wgame" }
+either = { version = "1.15.0", default-features = false }
