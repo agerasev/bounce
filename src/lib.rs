@@ -227,13 +227,14 @@ pub fn sample_item<S: Solver>(
             rot: Var::new(Rot2::default()),
             asp: Var::default(),
         },
-        color: HSL {
-            h: rng.sample(Uniform::new(0.0, 360.0).unwrap()),
-            s: 1.0,
-            l: 0.5,
-        }
-        .to_rgb()
-        .into(),
+        color: Rgb::from(
+            HSL {
+                h: rng.sample(Uniform::new(0.0, 360.0).unwrap()),
+                s: 1.0,
+                l: 0.5,
+            }
+            .to_rgb(),
+        ) / 255.0,
         texture: match &shape {
             Shape::Circle { .. } => textures.ball.clone(),
             Shape::Rectangle { .. } => textures.noise.clone(),
