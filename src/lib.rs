@@ -10,7 +10,7 @@ use phy::{Rot2, Solver, Var};
 use physics::{Body, Shape};
 use rand::Rng;
 use rand_distr::Uniform;
-pub use render::{DrawActor, DrawMode, TextureStorage};
+pub use render::{DrawMode, TextureStorage};
 use rgb::Rgb;
 
 #[derive(Clone, Deref, DerefMut)]
@@ -43,6 +43,10 @@ impl<S: Solver> World<S> {
 
     pub fn size(&self) -> Vec2 {
         self.size
+    }
+
+    pub fn wall_size(&self) -> Vec2 {
+        self.size - physics::WALL_OFFSET * self.size.min_element()
     }
 
     pub fn drag_acquire(&mut self, pos: Vec2) {

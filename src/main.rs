@@ -1,15 +1,17 @@
+//! Interactive controls are listed in the window and README. Simulation uses a
+//! 240 Hz fixed RK4 step. Catch-up is capped at 24 steps per frame (100 ms);
+//! excess elapsed time is discarded after stalls, rather than increasing dt.
+//! Pause, focus loss, reset and speed changes discard accumulated time.
 use std::time::Duration;
 
-use bounce::{DrawActor, DrawMode, TextureStorage, World, sample_item};
-use glam::{Vec4, Vec4Swizzles};
+use bounce::{DrawMode, TextureStorage, World, sample_item};
+use glam::{Affine2, Vec2};
 use phy::{Rk4, Solver};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
-use rand_distr::Uniform;
 use wgame::{
-    Event, Library, Window,
+    Event, Library, Result, Window,
     app::time::Instant,
     gfx::types::{Color, color},
-    glam::{Affine2, Vec2},
     input::{
         event::{ElementState, MouseButton},
         keyboard::{KeyCode, PhysicalKey},
@@ -17,160 +19,183 @@ use wgame::{
     prelude::*,
 };
 
+const SEED: u64 = 0xdeadbeef;
+const SCALE: f32 = 640.0;
+const STEP: Duration = Duration::from_nanos(4_166_667);
+const MAX_STEPS: u32 = 24;
+
+fn reset(size: Vec2, rng: &mut SmallRng) -> World<Rk4> {
+    *rng = SmallRng::seed_from_u64(SEED);
+    let mut world = World::new(size);
+    for _ in 0..8 {
+        world.insert_item(sample_item(&mut *rng, world.wall_size()));
+    }
+    world
+}
+
 #[wgame::window(title = "Bounce", size = (1200, 900), resizable = true, vsync = true)]
-async fn main(mut window: Window<'_>) {
+async fn main(mut window: Window<'_>) -> Result<()> {
     let gfx = Library::new(window.graphics());
-
-    let mut rng = SmallRng::seed_from_u64(0xdeadbeef);
-    let textures = TextureStorage::load("assets", &mut rng, &gfx).await;
-
-    // let font = gfx.load_font("assets/free-sans-bold.ttf").await.unwrap();
-    // let mut font_raster = None;
-    // let mut text = None;
-
-    let mut viewport = Vec2::ZERO;
-    let scale = 640.0;
-
-    let mut toy_box: Option<World<Rk4>> = None;
+    // Asset generation has its own RNG so changing a texture cannot change reset.
+    let textures = TextureStorage::new(&mut SmallRng::seed_from_u64(SEED), &gfx)?;
+    let font_data =
+        wgame::typography::FontData::new(include_bytes!("../assets/DejaVuSans.ttf").to_vec(), 0)
+            .map_err(|err| err.context("cannot decode embedded DejaVuSans.ttf"))?;
+    let font = gfx.make_font(&font_data);
+    let raster = font.rasterize(18.0);
+    let help = raster.text("+/-: add/remove   Drag: left mouse   Esc: quit");
+    let mut status = raster.text("");
+    let mut previous_status = String::new();
+    let mut rng = SmallRng::seed_from_u64(SEED);
+    let mut world = None;
     let mut mode = DrawMode::Normal;
-
+    let mut paused = false;
+    let mut slow = false;
+    let mut focused = true;
     let mut events = window.input();
-    let mut mouse_pos = Vec2::ZERO;
-    let mut mouse_down = false;
+    // Keep physical coordinates so a stationary cursor remains valid after resize.
+    let mut mouse = None;
+    let mut last = Instant::now();
+    let mut accumulated = Duration::ZERO;
 
-    let mut time = Instant::now();
-    'frame_loop: while let Some(mut frame) = window.next_frame().await.unwrap() {
-        if let Some((width, height)) = frame.resized() {
-            viewport = Vec2::new(width as f32, height as f32);
-            toy_box = Some(match toy_box.take() {
-                None => {
-                    let mut toy_box = World::new(viewport / scale);
-                    for _ in 0..8 {
-                        toy_box.insert_item(sample_item(&mut rng, toy_box.size()));
-                    }
-                    toy_box
-                }
-                Some(mut toy_box) => {
-                    toy_box.resize(viewport / scale);
-                    toy_box
-                }
-            });
-
-            // let raster = font_raster.insert(font.rasterize(height as f32 / 10.0));
-            // text = Some(raster.text("Hello, World!"));
+    'frames: while let Some(mut frame) = window.next_frame().await? {
+        let size = frame.size();
+        let viewport = Vec2::new(size.0 as f32, size.1 as f32);
+        let mut reset_clock = false;
+        let world = world.get_or_insert_with(|| reset(viewport / SCALE, &mut rng));
+        if frame.resized().is_some() {
+            world.resize(viewport / SCALE);
+            reset_clock = true;
         }
-
-        let toy_box = toy_box.as_mut().unwrap();
         let camera = frame
             .physical_camera()
             .transform(Affine2::from_scale_angle_translation(
-                Vec2::splat(0.5 * scale),
+                Vec2::splat(0.5 * SCALE),
                 0.0,
                 0.5 * viewport,
             ));
-
         while let Some(event) = events.try_next() {
             match event {
-                Event::KeyboardInput { event, .. } => {
-                    if event.state.is_pressed()
-                        && !event.repeat
-                        && let PhysicalKey::Code(key) = event.physical_key
-                    {
+                Event::KeyboardInput { event, .. } if event.state.is_pressed() && !event.repeat => {
+                    if let PhysicalKey::Code(key) = event.physical_key {
                         match key {
-                            KeyCode::Escape => break 'frame_loop,
-                            KeyCode::Equal | KeyCode::NumpadAdd => {
-                                toy_box.insert_item(sample_item(&mut rng, toy_box.size()));
+                            KeyCode::Escape => {
+                                frame.discard();
+                                break 'frames;
                             }
-                            KeyCode::Minus | KeyCode::NumpadSubtract => {
-                                if toy_box.n_items() != 0 {
-                                    toy_box.remove_item(
-                                        rng.sample(Uniform::new(0, toy_box.n_items()).unwrap()),
-                                    );
-                                }
+                            KeyCode::Equal | KeyCode::NumpadAdd => {
+                                world.insert_item(sample_item(&mut rng, world.wall_size()))
+                            }
+                            KeyCode::Minus | KeyCode::NumpadSubtract if world.n_items() > 0 => {
+                                world.remove_item(rng.random_range(0..world.n_items()));
                             }
                             KeyCode::Backslash => {
-                                mode = match mode {
-                                    DrawMode::Normal => DrawMode::Debug,
-                                    DrawMode::Debug => DrawMode::Normal,
+                                mode = if mode == DrawMode::Normal {
+                                    DrawMode::Debug
+                                } else {
+                                    DrawMode::Normal
                                 }
+                            }
+                            KeyCode::Space => {
+                                paused = !paused;
+                                reset_clock = true;
+                            }
+                            KeyCode::KeyS => {
+                                slow = !slow;
+                                reset_clock = true;
+                            }
+                            KeyCode::KeyR => {
+                                *world = reset(viewport / SCALE, &mut rng);
+                                reset_clock = true;
                             }
                             _ => (),
                         }
                     }
                 }
-                Event::MouseInput { state, button, .. } => match (state, button) {
-                    (ElementState::Pressed, MouseButton::Left) => {
-                        mouse_down = true;
-                        toy_box.drag_acquire(mouse_pos);
+                Event::MouseInput {
+                    state,
+                    button: MouseButton::Left,
+                    ..
+                } => match state {
+                    ElementState::Pressed => {
+                        if let Some(pos) = mouse.and_then(|pos| camera.screen_to_world(pos, size)) {
+                            world.drag_acquire(pos);
+                        }
                     }
-                    (ElementState::Released, MouseButton::Left) => {
-                        mouse_down = false;
-                        toy_box.drag_release();
-                    }
-                    _ => (),
+                    ElementState::Released => world.drag_release(),
                 },
                 Event::CursorMoved { position, .. } => {
-                    let world_pos = camera.logical_to_world(Vec4::new(
-                        2.0 * position.x as f32 / viewport.x - 1.0,
-                        1.0 - 2.0 * position.y as f32 / viewport.y,
-                        0.0,
-                        1.0,
-                    ));
-                    mouse_pos = world_pos.xy();
-
-                    if mouse_down {
-                        toy_box.drag_move(mouse_pos);
+                    let pixel = Vec2::new(position.x as f32, position.y as f32);
+                    mouse = Some(pixel);
+                    if let Some(pos) = camera.screen_to_world(pixel, size) {
+                        world.drag_move(pos);
                     }
                 }
-                Event::CursorLeft { .. } | Event::Focused(false) => {
-                    mouse_down = false;
-                    toy_box.drag_release();
+                Event::CursorLeft { .. } => {
+                    world.drag_release();
+                    mouse = None;
+                }
+                Event::Focused(value) => {
+                    focused = value;
+                    world.drag_release();
+                    reset_clock = true;
                 }
                 _ => (),
             }
         }
-
-        frame.clear(match mode {
-            DrawMode::Normal => color::BLACK.mix(color::WHITE, 0.5),
-            DrawMode::Debug => color::BLACK.to_rgba(),
+        let now = Instant::now();
+        if reset_clock || paused || !focused {
+            accumulated = Duration::ZERO;
+        } else {
+            let elapsed = (now - last).min(STEP * MAX_STEPS);
+            accumulated += if slow { elapsed / 10 } else { elapsed };
+            for _ in 0..MAX_STEPS {
+                if accumulated < STEP {
+                    break;
+                }
+                Rk4.solve_step(world, STEP.as_secs_f32());
+                accumulated -= STEP;
+            }
+        }
+        last = now;
+        frame.clear(if mode == DrawMode::Normal {
+            color::BLACK.mix(color::WHITE, 0.5)
+        } else {
+            color::BLACK.to_rgba()
         });
-
         let mut scene = frame.scene();
         scene.camera = camera;
+        world.draw(&gfx, &textures, &mut scene, mode);
+        scene.render();
 
-        {
-            let now = Instant::now();
-            let frame_time = now - time;
-            time = now;
-            let dt = frame_time
-                .min(Duration::from_millis(40))
-                .div_f32(if mode == DrawMode::Debug { 10.0 } else { 1.0 });
-            Rk4.solve_step(toy_box, dt.as_secs_f32());
-        }
-
-        {
-            toy_box.draw(&gfx, &textures, &mut scene, mode);
-            if mode == DrawMode::Debug {
-                let mut actor = DrawActor {
-                    lib: &gfx,
-                    scene: &mut scene,
-                };
-                toy_box.visit_forces(|pos, force| actor.apply(pos, force));
-            }
-
-            /*
+        let label = format!(
+            "{} bodies | Space: {} | S: {} | \\: {} | R: reset{}",
+            world.n_items(),
+            if paused { "resume" } else { "pause" },
+            if slow { "normal speed" } else { "slow motion" },
             if mode == DrawMode::Normal {
-                draw_text_aligned(
-                    &format!("{}", toy_box.n_items()),
-                    viewport.x - 30.0,
-                    60.0,
-                    TextAlign::Right,
-                    Some(&font),
-                    40.0,
-                    color::WHITE,
-                );
-            }
-            */
+                "debug"
+            } else {
+                "normal"
+            },
+            if focused { "" } else { " | unfocused" }
+        );
+        if label != previous_status {
+            status = raster.text(&label);
+            previous_status = label;
         }
+        let camera = frame.physical_camera();
+        let mut overlay = frame.scene();
+        overlay.camera = camera;
+        overlay.add(
+            &gfx.shapes()
+                .rectangle((Vec2::ZERO, Vec2::new(viewport.x, 64.0)))
+                .fill_color(color::BLACK),
+        );
+        overlay.add(&status.scale(raster.size()).move_to(Vec2::new(12.0, 24.0)));
+        overlay.add(&help.scale(raster.size()).move_to(Vec2::new(12.0, 49.0)));
+        overlay.render();
+        frame.present();
     }
+    Ok(())
 }

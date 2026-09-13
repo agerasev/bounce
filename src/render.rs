@@ -1,15 +1,12 @@
-use crate::{
-    Item, World,
-    physics::{Shape, WALL_OFFSET},
-};
+//! Shared assets and drawing. All world access here is immutable.
+use crate::{World, physics::Shape};
 use glam::{Affine2, Vec2, Vec4, Vec4Swizzles};
 use phy::Solver;
 use rand::Rng;
 use rand_distr::Uniform;
 use rgb::Rgb;
 use wgame::{
-    Library,
-    fs::Path,
+    Library, Result,
     gfx::{
         Scene,
         types::{Color, color},
@@ -19,76 +16,74 @@ use wgame::{
     texture::{Texture, TextureSettings},
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum DrawMode {
     #[default]
     Normal,
     Debug,
 }
 
-/// Drawing border thickness factor
-const BORDERX: f32 = 1.0 / 24.0;
+const BORDER: f32 = 0.006;
+const FORCE_SCALE: f32 = 0.12;
 
-impl<S: Solver> Item<S> {
-    fn draw(&self, lib: &Library, textures: &TextureStorage, scene: &mut Scene, mode: DrawMode) {
-        let (size, order) = match &self.shape {
-            Shape::Circle { radius } => (Vec2::splat(*radius), 1),
-            Shape::Rectangle { size } => (*size, 0),
-        };
-        match mode {
-            DrawMode::Normal => {
-                scene.add(
-                    &lib.shapes()
-                        .unit_quad()
-                        .transform(Affine2::from_scale_angle_translation(
-                            size,
-                            self.rot.angle(),
-                            *self.pos,
-                        ))
-                        .fill_texture(match self.shape {
-                            Shape::Circle { .. } => &textures.ball,
-                            Shape::Rectangle { .. } => &textures.noise,
-                        })
-                        .multiply_color(self.color)
-                        .order(order),
-                );
-            }
-            DrawMode::Debug => match &self.shape {
-                Shape::Circle { .. } => {
-                    /*
-                    draw_circle_lines(
-                        self.pos.x,
-                        self.pos.y,
-                        *radius,
-                        BORDERX * radius,
-                        self.color,
-                    ),
-                    */
-                }
-                Shape::Rectangle { .. } => {
-                    // Draw later
-                }
-            },
-        }
-        if let Shape::Rectangle { .. } = &self.shape {
-            /*
-            draw_rectangle_lines_ex(
-                self.pos.x,
-                self.pos.y,
-                2.0 * size.x,
-                2.0 * size.y,
-                BORDERX * size.min_element(),
-                DrawRectangleParams {
-                    offset: Vec2::new(0.5, 0.5),
-                    rotation: self.rot.angle(),
-                    color: match mode {
-                        DrawMode::Normal => color::BLACK,
-                        DrawMode::Debug => self.color,
-                    },
-                },
-            );
-            */
-        }
+pub struct TextureStorage {
+    ball: Texture,
+    noise: Texture,
+}
+
+impl TextureStorage {
+    pub fn new(rng: &mut impl Rng, lib: &Library) -> Result<Self> {
+        let ball = Image::decode_auto(include_bytes!("../assets/ball.png"))
+            .map_err(|err| err.context("cannot decode embedded ball.png"))?;
+        Ok(Self {
+            ball: lib.make_texture(&ball, TextureSettings::linear()),
+            noise: noisy_texture(
+                rng,
+                lib,
+                32,
+                32,
+                Rgb::new(0.75, 0.75, 0.75),
+                Rgb::new(0.25, 0.25, 0.25),
+            ),
+        })
+    }
+}
+
+fn outline(
+    lib: &Library,
+    scene: &mut Scene,
+    size: Vec2,
+    transform: Affine2,
+    tint: Rgb<f32>,
+    width: f32,
+    order: i32,
+) {
+    // Join the four edges without overlapping their corner pixels.
+    for (min, max) in [
+        (
+            Vec2::new(-size.x - width / 2.0, -size.y - width / 2.0),
+            Vec2::new(size.x + width / 2.0, -size.y + width / 2.0),
+        ),
+        (
+            Vec2::new(-size.x - width / 2.0, size.y - width / 2.0),
+            Vec2::new(size.x + width / 2.0, size.y + width / 2.0),
+        ),
+        (
+            Vec2::new(-size.x - width / 2.0, -size.y + width / 2.0),
+            Vec2::new(-size.x + width / 2.0, size.y - width / 2.0),
+        ),
+        (
+            Vec2::new(size.x - width / 2.0, -size.y + width / 2.0),
+            Vec2::new(size.x + width / 2.0, size.y - width / 2.0),
+        ),
+    ] {
+        scene.add(
+            &lib.shapes()
+                .rectangle((min, max))
+                .transform(transform)
+                .fill_color(tint)
+                .order(order),
+        );
     }
 }
 
@@ -100,71 +95,121 @@ impl<S: Solver> World<S> {
         scene: &mut Scene,
         mode: DrawMode,
     ) {
-        let wall_size = self.size - WALL_OFFSET * self.size.min_element();
-        match mode {
-            DrawMode::Normal => {
-                let thickness = 2.0 * WALL_OFFSET * self.size.max_element();
-                let wall_size = wall_size + 0.5 * thickness;
+        let wall = self.wall_size();
+        if mode == DrawMode::Normal {
+            scene.add(
+                &lib.shapes()
+                    .rectangle((-wall, wall))
+                    .fill_color(color::WHITE)
+                    .order(-1000),
+            );
+        }
+        outline(
+            lib,
+            scene,
+            wall,
+            Affine2::IDENTITY,
+            if mode == DrawMode::Normal {
+                color::BLACK
+            } else {
+                color::WHITE
+            },
+            BORDER,
+            -999,
+        );
+        for item in &self.items {
+            let (size, order, texture) = match item.shape {
+                Shape::Circle { radius } => (Vec2::splat(radius), 1, &textures.ball),
+                Shape::Rectangle { size } => (size, 0, &textures.noise),
+            };
+            let transform = Affine2::from_angle_translation(item.rot.angle(), *item.pos);
+            if mode == DrawMode::Normal {
                 scene.add(
                     &lib.shapes()
-                        .rectangle((
-                            -wall_size + Vec2::splat(0.5 * thickness),
-                            wall_size - Vec2::splat(0.5 * thickness),
-                        ))
+                        .unit_quad()
+                        .transform(Affine2::from_scale(size))
+                        .transform(transform)
+                        .fill_texture(texture)
+                        .multiply_color(item.color)
+                        .order(order),
+                );
+            }
+            let tint = if mode == DrawMode::Normal {
+                color::BLACK
+            } else {
+                item.color
+            };
+            match item.shape {
+                Shape::Circle { radius } if mode == DrawMode::Debug => {
+                    scene.add(
+                        &lib.shapes()
+                            .unit_circle()
+                            .stroke_color(BORDER / radius, tint)
+                            .scale(radius)
+                            .transform(transform)
+                            .order(order),
+                    );
+                    scene.add(
+                        &lib.shapes()
+                            .line(Vec2::ZERO, Vec2::new(radius, 0.0), BORDER)
+                            .transform(transform)
+                            .fill_color(tint)
+                            .order(order),
+                    );
+                }
+                Shape::Rectangle { size } => {
+                    outline(lib, scene, size, transform, tint, BORDER, order)
+                }
+                _ => (),
+            }
+        }
+        if mode == DrawMode::Debug {
+            self.visit_forces(|pos, force| {
+                let vector = FORCE_SCALE * force;
+                let length = vector.length();
+                if !length.is_finite() || length < BORDER {
+                    return;
+                }
+                let tip = pos + vector;
+                let direction = vector / length;
+                let head = length.min(0.035);
+                let base = tip - head * direction;
+                scene.add(
+                    &lib.shapes()
+                        .line(pos, base, BORDER)
                         .fill_color(color::WHITE)
-                        .order(-1000),
+                        .order(2),
                 );
-                /*
-                draw_rectangle_lines(
-                    -wall_size.x,
-                    -wall_size.y,
-                    2.0 * wall_size.x,
-                    2.0 * wall_size.y,
-                    thickness,
-                    color::WHITE,
+                scene.add(
+                    &lib.shapes()
+                        .triangle(
+                            tip,
+                            base + 0.4 * head * direction.perp(),
+                            base - 0.4 * head * direction.perp(),
+                        )
+                        .fill_color(color::WHITE)
+                        .order(2),
                 );
-                */
-            }
-            DrawMode::Debug => {
-                /*
-                draw_rectangle_lines(
-                    -wall_size.x,
-                    -wall_size.y,
-                    2.0 * wall_size.x,
-                    2.0 * wall_size.y,
-                    0.3 * BORDERX,
-                    color::WHITE,
-                ),
-                */
-            }
+            });
         }
-        for item in &self.items {
-            item.draw(lib, textures, scene, mode);
+        if let Some((index, target, local)) = self.drag {
+            let item = &self.items[index];
+            let point = *item.pos + item.rot.transform(local);
+            scene.add(
+                &lib.shapes()
+                    .line(point, target, BORDER)
+                    .fill_color(color::MAGENTA)
+                    .order(3),
+            );
+            scene.add(
+                &lib.shapes()
+                    .unit_circle()
+                    .stroke_color(0.2, color::MAGENTA)
+                    .scale(0.025)
+                    .move_to(target)
+                    .order(3),
+            );
         }
-    }
-}
-const FORCEX: f32 = 0.05;
-
-pub struct DrawActor<'a> {
-    pub lib: &'a Library,
-    pub scene: &'a mut Scene,
-}
-
-impl DrawActor<'_> {
-    pub fn apply(&mut self, pos: Vec2, force: Vec2) {
-        let fpos = pos + FORCEX * force;
-        // Draw an arrow
-        self.scene.add(
-            &self
-                .lib
-                .shapes()
-                .triangle(
-                    fpos,
-                    pos - BORDERX * FORCEX * force.perp(),
-                    pos + BORDERX * FORCEX * force.perp(),
-                )
-                .fill_color(color::WHITE),
-        );
     }
 }
 
@@ -188,31 +233,4 @@ fn noisy_texture<R: Rng>(
         ),
         TextureSettings::nearest(),
     )
-}
-
-pub struct TextureStorage {
-    ball: Texture,
-    noise: Texture,
-}
-
-impl TextureStorage {
-    pub async fn load(base: impl AsRef<Path>, rng: &mut impl Rng, lib: &Library) -> Self {
-        Self {
-            ball: lib
-                .load_texture(
-                    format!("{}/ball.png", base.as_ref()),
-                    TextureSettings::linear(),
-                )
-                .await
-                .unwrap(),
-            noise: noisy_texture(
-                rng,
-                lib,
-                32,
-                32,
-                Rgb::new(0.75, 0.75, 0.75),
-                Rgb::new(0.25, 0.25, 0.25),
-            ),
-        }
-    }
 }

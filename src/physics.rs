@@ -213,7 +213,7 @@ impl<S: Solver> Item<S> {
         };
 
         if area > AREA_EPS {
-            let force = area; // .sqrt();
+            let force = area;
             Some((
                 self.contact(-force * dir, poa, other.vel_at(poa)),
                 other.contact(force * dir, poa, self.vel_at(poa)),
@@ -227,11 +227,10 @@ impl<S: Solver> Item<S> {
 /// Visits linear forces without changing solver variables or their derivatives.
 fn visit_forces<S: Solver>(
     items: &[Item<S>],
-    size: Vec2,
+    wall: Vec2,
     drag: Option<(usize, Vec2, Vec2)>,
     mut apply: impl FnMut(usize, Force),
 ) {
-    let wall = size - WALL_OFFSET * size.min_element();
     for (i, item) in items.iter().enumerate() {
         apply(
             i,
@@ -266,7 +265,7 @@ impl<S: Solver> World<S> {
     /// Observes linear forces at the current state. Rotational air drag is a pure
     /// torque, so it has no arrow at a point of application.
     pub fn visit_forces(&self, mut apply: impl FnMut(Vec2, Vec2)) {
-        visit_forces(&self.items, self.size, self.drag, |_, force| {
+        visit_forces(&self.items, self.wall_size(), self.drag, |_, force| {
             apply(force.pos, force.vector)
         });
     }
@@ -276,8 +275,9 @@ impl<S: Solver> System<S> for World<S> {
     fn compute_derivs(&mut self, _: &S::Context) {
         self.forces.clear();
         self.forces.resize(self.items.len(), (Vec2::ZERO, 0.0));
+        let wall = self.wall_size();
         let items = &self.items;
-        visit_forces(items, self.size, self.drag, |i, force| {
+        visit_forces(items, wall, self.drag, |i, force| {
             self.forces[i].0 += force.vector;
             self.forces[i].1 += torque2(force.pos - *items[i].pos, force.vector);
         });
