@@ -1,48 +1,42 @@
 use super::{Item, World};
-use either::Either;
 use geom2::{
-    ArcVertex, Circle, Disk, HalfPlane, Integrable, Intersect, IntersectTo, Meta, MetaArcPolygon,
-    MetaPolygon, Moment, Polygon,
+    Disk, HalfPlane, Polygon,
+    pressure::{
+        ContactLoad, ContactPiece, Interface, Pressure, PressureDomain, PressureError,
+        PressureField,
+    },
 };
-use glam::Vec2;
-use phy::{Rot2, Solver, System, Var, Visitor, angular_to_linear2, torque2};
-use smallvec::SmallVec;
+use glam::{DVec2, Vec2};
+use phy::{Rot2, Solver, System, Var, Visitor, angular_to_linear2};
 
-const AREA_EPS: f32 = 0.0;
-
-/// Mass factor
+/// Mass factor.
 pub const MASF: f32 = 1.0;
-/// Moment of inertia factor
+/// Moment of inertia factor.
 pub const INMF: f32 = 0.2;
 
-/// Gravity
 const GRAV: Vec2 = Vec2::new(0.0, 4.0);
-/// Air resistance
 const AIRF: f32 = 0.01;
-
-/// Elasticity of balls
-const ELAST: f32 = 200.0;
-
-/// Damping factor.
-const DAMP: f32 = 0.2;
-/// Liquid friction
-const FRICT: f32 = 0.4;
-
-/// Mouse attraction damping.
+/// Peak interior pressure, per unit thickness. Not the old area-force factor.
+const PRESSURE: f64 = 200.0;
+/// Pressure gradient inside a compliant wall.
+const WALL_STIFFNESS: f64 = 1000.0;
+/// Additional center spring outside the arena: U = 0.5*k*outside_distance².
+/// Finite body pressure alone stops restoring once fully submerged in a wall.
+const WALL_RECOVERY_STIFFNESS: f64 = 4000.0;
+/// Velocity-dependent traction factors; intentionally much lower than before.
+const DAMP: f64 = 0.02;
+const FRICT: f64 = 0.04;
+/// Dragging is an independent point spring.
+const MOUSE_STIFFNESS: f32 = 200.0;
 const MOUSE_DAMP: f32 = 4.0;
-
-/// Wall offset factor
 pub const WALL_OFFSET: f32 = 0.04;
+
+type Triangle = Pressure<Polygon<[Vec2; 3]>>;
 
 #[derive(Clone, Debug)]
 pub enum Shape {
-    Circle {
-        radius: f32,
-    },
-    Rectangle {
-        /// Half len of rectangle sides
-        size: Vec2,
-    },
+    Circle { radius: f32 },
+    Rectangle { size: Vec2 },
 }
 
 impl Shape {
@@ -52,6 +46,20 @@ impl Shape {
             Shape::Rectangle { size } => size.min_element(),
         }
     }
+
+    fn bounding_radius(&self) -> f32 {
+        match self {
+            Shape::Circle { radius } => *radius,
+            Shape::Rectangle { size } => size.length(),
+        }
+    }
+}
+
+/// Rebuilt once per derivative evaluation, then reused by all pair contacts.
+#[derive(Clone, Debug)]
+pub(crate) enum ContactShape {
+    Disk(Pressure<Disk>),
+    Rectangle([Triangle; 4]),
 }
 
 impl<S: Solver> Item<S> {
@@ -63,181 +71,256 @@ impl<S: Solver> Item<S> {
         }
     }
 
-    pub fn geometry(&self) -> Either<Disk, Polygon<SmallVec<[Vec2; 4]>>> {
+    fn contact_shape(&self) -> ContactShape {
         match self.shape {
-            Shape::Circle { radius } => Either::Left(Disk(Circle {
-                center: *self.pos,
-                radius,
-            })),
+            Shape::Circle { radius } => ContactShape::Disk(
+                Pressure::disk(Disk::new(*self.pos, radius), PRESSURE)
+                    .expect("body must have finite position and positive size"),
+            ),
             Shape::Rectangle { size } => {
+                let rotation = self.rot.matrix();
                 let corners = [
                     -size,
                     Vec2::new(size.x, -size.y),
                     size,
                     Vec2::new(-size.x, size.y),
                 ]
-                .map(|p| *self.pos + self.rot.transform(p));
-                Either::Right(Polygon::<SmallVec<[Vec2; 4]>>::new(SmallVec::from(corners)))
+                .map(|p| *self.pos + rotation * p);
+                ContactShape::Rectangle(core::array::from_fn(|i| {
+                    Pressure::triangle(
+                        Polygon::new([corners[i], corners[(i + 1) % 4], *self.pos]),
+                        [0.0, 0.0, PRESSURE],
+                    )
+                    .expect("body must have finite position and nondegenerate rectangle geometry")
+                }))
             }
         }
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct Force {
-    pub pos: Vec2,
-    pub vector: Vec2,
+/// Force and independent torque about `pos`, not a force at an assumed centroid.
+#[derive(Clone, Copy, Debug)]
+struct AppliedLoad {
+    pos: DVec2,
+    load: ContactLoad,
 }
 
-/// Rigid body
+impl AppliedLoad {
+    fn force(pos: Vec2, force: Vec2) -> Self {
+        Self {
+            pos: pos.as_dvec2(),
+            load: ContactLoad {
+                force: force.as_dvec2(),
+                torque: 0.0,
+            },
+        }
+    }
+
+    fn about(self, reference: DVec2) -> ContactLoad {
+        ContactLoad {
+            force: self.load.force,
+            torque: self.load.torque + (self.pos - reference).perp_dot(self.load.force),
+        }
+    }
+
+    fn opposite(self) -> Self {
+        Self {
+            pos: self.pos,
+            load: ContactLoad {
+                force: -self.load.force,
+                torque: -self.load.torque,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Body<S: Solver> {
     pub mass: f32,
     pub pos: Var<Vec2, S>,
     pub vel: Var<Vec2, S>,
-
-    /// Moment of inertia
     pub inm: f32,
-    /// Rotation.
     pub rot: Var<Rot2, S>,
-    /// Angular speed.
     pub asp: Var<f32, S>,
 }
 
 impl<S: Solver> Body<S> {
-    fn vel_at(&self, p: Vec2) -> Vec2 {
-        *self.vel + angular_to_linear2(*self.asp, p - *self.pos)
+    fn vel_at(&self, p: DVec2) -> DVec2 {
+        self.vel.as_dvec2() + *self.asp as f64 * (p - self.pos.as_dvec2()).perp()
     }
 
-    /// Influence item by directed deformation `def` at point of contact `pos` moving with velocity `vel`.
-    pub fn contact(&self, def: Vec2, pos: Vec2, vel: Vec2) -> Force {
-        let vel = self.vel_at(pos) - vel;
-
-        let norm = def.normalize_or_zero();
-        // Elastic force (normal reaction)
-        let elast_f = ELAST * def;
-
-        // Damping force (parallel to `norm`)
-        let damp_f = -DAMP * vel.dot(norm) * elast_f;
-        // Liquid friction force (perpendicular to `norm`)
-        let frict_f = -FRICT * vel.dot(norm.perp()) * elast_f.perp();
-        // Total force
-        let total_f = elast_f + damp_f + frict_f;
-
-        Force {
-            pos,
-            vector: total_f,
-        }
-    }
-
-    /// Pin `loc_pos` point in local item coordinates to `target` point in world space.
-    pub fn attract(&self, target: Vec2, self_pos: Vec2) -> Force {
+    fn attract(&self, target: Vec2, self_pos: Vec2) -> AppliedLoad {
         let loc_pos = self.rot.transform(self_pos);
         let rel_pos = target - (*self.pos + loc_pos);
         let vel = *self.vel + angular_to_linear2(*self.asp, loc_pos);
+        AppliedLoad::force(
+            *self.pos + loc_pos,
+            MOUSE_STIFFNESS * rel_pos - MOUSE_DAMP * vel,
+        )
+    }
+}
 
-        // Elastic attraction
-        let elast_f = ELAST * rel_pos;
-        // Constant damping
-        let damp_f = -MOUSE_DAMP * vel;
-        // Total force
-        let total_f = elast_f + damp_f;
+fn visit_interface<G: PressureDomain, H: PressureDomain>(
+    a: &Pressure<G>,
+    b: &Pressure<H>,
+    visit: &mut impl FnMut(ContactPiece),
+) {
+    match a.interface(b) {
+        Ok(interface) => interface.for_each(visit),
+        // No normal exists on identical field polynomials. Choose zero on the
+        // tied cell interior; ordinary interfaces and shared-edge half weights
+        // still contribute around it. Exactly coincident identical bodies have
+        // no preferred separating direction and receive no arbitrary impulse.
+        Err(PressureError::CoincidentFields) => (),
+        Err(error) => panic!("invalid pressure contact: {error:?}"),
+    }
+}
 
-        Force {
-            pos: *self.pos + loc_pos,
-            vector: total_f,
+impl ContactShape {
+    fn visit_pair(&self, other: &Self, visit: &mut impl FnMut(ContactPiece)) {
+        match (self, other) {
+            (Self::Disk(a), Self::Disk(b)) => visit_interface(a, b, visit),
+            (Self::Disk(a), Self::Rectangle(bs)) => {
+                for b in bs {
+                    visit_interface(a, b, visit);
+                }
+            }
+            (Self::Rectangle(as_), Self::Disk(b)) => {
+                for a in as_ {
+                    visit_interface(a, b, visit);
+                }
+            }
+            (Self::Rectangle(as_), Self::Rectangle(bs)) => {
+                for a in as_ {
+                    for b in bs {
+                        visit_interface(a, b, visit);
+                    }
+                }
+            }
+        }
+    }
+
+    fn visit_wall(&self, wall: &Pressure<HalfPlane>, visit: &mut impl FnMut(ContactPiece)) {
+        match self {
+            Self::Disk(a) => visit_interface(a, wall, visit),
+            Self::Rectangle(cells) => {
+                for cell in cells {
+                    visit_interface(cell, wall, visit);
+                }
+            }
         }
     }
 }
 
-fn contact_wall<S: Solver>(item: &Item<S>, offset: f32, normal: Vec2) -> Option<Force> {
-    let wall = HalfPlane { normal, offset };
-    let overlay = match item.geometry() {
-        Either::Left(left) => left.intersect(&wall).map(|x| x.moment()),
-        Either::Right(right) => right
-            .intersect_to(&wall)
-            .map(|x: Polygon<SmallVec<[Vec2; 5]>>| x.moment()),
-    };
-    if let Some(overlay) = overlay
-        && overlay.area > AREA_EPS
-    {
-        let dir = normal;
-        let force = overlay.area;
-        let poa = overlay.centroid;
-        Some(item.body.contact(dir * force, poa, Vec2::ZERO))
-    } else {
-        None
-    }
-}
-
-impl<S: Solver> Item<S> {
-    pub fn collide(&self, other: &Self) -> Option<(Force, Force)> {
-        let (area, dir, poa) = match (self.geometry(), other.geometry()) {
-            (Either::Left(self_circle), Either::Left(other_circle)) => {
-                let overlay = self_circle.intersect(&other_circle)?;
-                let Moment { area, centroid } = overlay.moment();
-                (area, *other.pos - *self.pos, centroid)
-            }
-            (Either::Left(circle), Either::Right(polygon))
-            | (Either::Right(polygon), Either::Left(circle)) => {
-                let overlay: MetaArcPolygon<SmallVec<[Meta<ArcVertex, f32>; 8]>, f32> =
-                    Meta::new(circle, -0.5).intersect_to(&Meta::new(polygon, 0.5))?;
-                let Moment { area, centroid } = overlay.map_vertices(|x| x.inner).moment();
-                let dir = overlay
-                    .edges()
-                    .map(|a| a.chord().vec() * a.meta)
-                    .sum::<Vec2>()
-                    .normalize_or_zero()
-                    .perp();
-                (
-                    area,
-                    match self.shape {
-                        Shape::Circle { .. } => dir,
-                        Shape::Rectangle { .. } => -dir,
-                    },
-                    centroid,
-                )
-            }
-            (Either::Right(self_polygon), Either::Right(other_polygon)) => {
-                let overlay: MetaPolygon<SmallVec<[Meta<Vec2, f32>; 8]>, f32> =
-                    Meta::new(self_polygon, -0.5).intersect_to(&Meta::new(other_polygon, 0.5))?;
-                let Moment { area, centroid } = overlay.map_vertices(|x| x.inner).moment();
-                let dir = overlay
-                    .edges()
-                    .map(|l| l.vec() * l.meta)
-                    .sum::<Vec2>()
-                    .normalize_or_zero()
-                    .perp();
-                (area, dir, centroid)
-            }
+/// The elastic contribution is analytic. Three positive Gauss weights integrate
+/// dissipative traction separately; every sample has nonpositive relative power.
+/// Applying the same sample to both bodies preserves action/reaction and torque.
+fn piece_load<S: Solver>(
+    piece: ContactPiece,
+    a: &Body<S>,
+    b: Option<&Body<S>>,
+    reference: DVec2,
+) -> ContactLoad {
+    let mut total = piece.integrate(reference);
+    for (fraction, weight) in [
+        (0.1127016653792583, 5.0 / 18.0),
+        (0.5, 4.0 / 9.0),
+        (0.8872983346207417, 5.0 / 18.0),
+    ] {
+        let (point, normal, pressure) = piece.sample(fraction);
+        let velocity = a.vel_at(point) - b.map_or(DVec2::ZERO, |b| b.vel_at(point));
+        let tangent = normal.perp();
+        let normal_speed = DAMP * velocity.dot(normal);
+        let tangent_speed = FRICT * velocity.dot(tangent);
+        // Bounded factors avoid an attractive local normal traction on fast
+        // separation and unbounded drag during a deeply overlapping spawn.
+        let force = -pressure.max(0.0)
+            * piece.length()
+            * piece.weight
+            * weight
+            * (normal * (normal_speed / (1.0 + normal_speed.abs()))
+                + tangent * (tangent_speed / (1.0 + tangent_speed.abs())));
+        total += ContactLoad {
+            force,
+            torque: (point - reference).perp_dot(force),
         };
-
-        if area > AREA_EPS {
-            let force = area;
-            Some((
-                self.contact(-force * dir, poa, other.vel_at(poa)),
-                other.contact(force * dir, poa, self.vel_at(poa)),
-            ))
-        } else {
-            None
-        }
     }
+    total
 }
 
-/// Visits linear forces without changing solver variables or their derivatives.
-fn visit_forces<S: Solver>(
+fn contact_pair<S: Solver>(
+    a: &Item<S>,
+    a_shape: &ContactShape,
+    b: &Item<S>,
+    b_shape: &ContactShape,
+) -> Option<AppliedLoad> {
+    let reach = a.shape.bounding_radius() as f64 + b.shape.bounding_radius() as f64;
+    if (a.pos.as_dvec2() - b.pos.as_dvec2()).length_squared() >= reach * reach {
+        return None;
+    }
+    let reference = a.pos.as_dvec2() + 0.5 * (b.pos.as_dvec2() - a.pos.as_dvec2());
+    let mut total = ContactLoad::default();
+    a_shape.visit_pair(b_shape, &mut |piece| {
+        total += piece_load(piece, &a.body, Some(&b.body), reference)
+    });
+    Some(AppliedLoad {
+        pos: reference,
+        load: total,
+    })
+}
+
+fn contact_wall<S: Solver>(
+    item: &Item<S>,
+    shape: &ContactShape,
+    offset: f32,
+    normal: Vec2,
+) -> Option<AppliedLoad> {
+    if item.pos.dot(normal) - item.shape.bounding_radius() >= offset {
+        return None;
+    }
+    let wall = Pressure {
+        geometry: HalfPlane { normal, offset },
+        field: PressureField {
+            origin: (normal * offset).as_dvec2(),
+            quadratic: 0.0,
+            linear: -WALL_STIFFNESS * normal.as_dvec2(),
+            constant: 0.0,
+        },
+    };
+    let reference = item.pos.as_dvec2();
+    let mut total = ContactLoad::default();
+    shape.visit_wall(&wall, &mut |piece| {
+        total += piece_load(piece, &item.body, None, reference)
+    });
+    let outside = offset as f64 - reference.dot(normal.as_dvec2());
+    if outside > 0.0 {
+        let elastic = WALL_RECOVERY_STIFFNESS * outside;
+        let speed = item.vel.as_dvec2().dot(normal.as_dvec2());
+        let damping = 1.4
+            * (WALL_RECOVERY_STIFFNESS * item.mass as f64).sqrt()
+            * (outside / item.shape.radius() as f64).min(1.0);
+        total.force += normal.as_dvec2() * (elastic - damping * speed).max(0.0);
+    }
+    Some(AppliedLoad {
+        pos: reference,
+        load: total,
+    })
+}
+
+fn visit_loads<S: Solver>(
     items: &[Item<S>],
+    shapes: &[ContactShape],
     wall: Vec2,
     drag: Option<(usize, Vec2, Vec2)>,
-    mut apply: impl FnMut(usize, Force),
+    mut apply: impl FnMut(usize, AppliedLoad),
 ) {
     for (i, item) in items.iter().enumerate() {
         apply(
             i,
-            Force {
-                pos: *item.pos,
-                vector: GRAV * item.mass - AIRF * item.shape.radius() * *item.vel,
-            },
+            AppliedLoad::force(
+                *item.pos,
+                GRAV * item.mass - AIRF * item.shape.radius() * *item.vel,
+            ),
         );
         for (offset, normal) in [
             (-wall.x, Vec2::X),
@@ -245,14 +328,14 @@ fn visit_forces<S: Solver>(
             (-wall.y, Vec2::Y),
             (-wall.y, Vec2::NEG_Y),
         ] {
-            if let Some(force) = contact_wall(item, offset, normal) {
-                apply(i, force);
+            if let Some(load) = contact_wall(item, &shapes[i], offset, normal) {
+                apply(i, load);
             }
         }
         for (j, other) in items.iter().enumerate().skip(i + 1) {
-            if let Some((left, right)) = item.collide(other) {
-                apply(i, left);
-                apply(j, right);
+            if let Some(load) = contact_pair(item, &shapes[i], other, &shapes[j]) {
+                apply(i, load);
+                apply(j, load.opposite());
             }
         }
     }
@@ -262,40 +345,61 @@ fn visit_forces<S: Solver>(
 }
 
 impl<S: Solver> World<S> {
-    /// Observes linear forces at the current state. Rotational air drag is a pure
-    /// torque, so it has no arrow at a point of application.
+    /// Observe forces immutably. Independent contact torques are represented by
+    /// equivalent force couples, so debug arrows retain the full contact load.
+    /// Rotational air drag remains omitted from the arrows.
     pub fn visit_forces(&self, mut apply: impl FnMut(Vec2, Vec2)) {
-        visit_forces(&self.items, self.wall_size(), self.drag, |_, force| {
-            apply(force.pos, force.vector)
-        });
+        let shapes: Vec<_> = self.items.iter().map(Item::contact_shape).collect();
+        visit_loads(
+            &self.items,
+            &shapes,
+            self.wall_size(),
+            self.drag,
+            |i, load| {
+                apply(load.pos.as_vec2(), load.load.force.as_vec2());
+                let arm = 0.5 * self.items[i].shape.radius() as f64;
+                let force = DVec2::X * (load.load.torque / (2.0 * arm));
+                if force != DVec2::ZERO {
+                    apply((load.pos - arm * DVec2::Y).as_vec2(), force.as_vec2());
+                    apply((load.pos + arm * DVec2::Y).as_vec2(), -force.as_vec2());
+                }
+            },
+        );
     }
 }
 
 impl<S: Solver> System<S> for World<S> {
     fn compute_derivs(&mut self, _: &S::Context) {
         self.forces.clear();
-        self.forces.resize(self.items.len(), (Vec2::ZERO, 0.0));
+        self.forces.resize(self.items.len(), ContactLoad::default());
+        self.contacts.clear();
+        self.contacts
+            .extend(self.items.iter().map(Item::contact_shape));
         let wall = self.wall_size();
         let items = &self.items;
-        visit_forces(items, wall, self.drag, |i, force| {
-            self.forces[i].0 += force.vector;
-            self.forces[i].1 += torque2(force.pos - *items[i].pos, force.vector);
+        visit_loads(items, &self.contacts, wall, self.drag, |i, load| {
+            self.forces[i] += load.about(items[i].pos.as_dvec2());
         });
-        for (item, &(force, torque)) in self.items.iter_mut().zip(&self.forces) {
+        for (item, load) in self.items.iter_mut().zip(&self.forces) {
             let radius = item.shape.radius();
             let body = &mut item.body;
             body.pos.deriv = *body.vel;
             body.rot.deriv = *body.asp;
-            body.vel.deriv = force / body.mass;
-            body.asp.deriv = (torque - AIRF * radius * *body.asp) / body.inm;
+            body.vel.deriv = (load.force / body.mass as f64).as_vec2();
+            body.asp.deriv =
+                ((load.torque - (AIRF * radius * *body.asp) as f64) / body.inm as f64) as f32;
         }
     }
+
     fn visit_vars<V: Visitor<S>>(&mut self, visitor: &mut V) {
-        for ent in &mut self.items {
-            visitor.apply(&mut ent.pos);
-            visitor.apply(&mut ent.vel);
-            visitor.apply(&mut ent.rot);
-            visitor.apply(&mut ent.asp);
+        for item in &mut self.items {
+            visitor.apply(&mut item.pos);
+            visitor.apply(&mut item.vel);
+            visitor.apply(&mut item.rot);
+            visitor.apply(&mut item.asp);
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

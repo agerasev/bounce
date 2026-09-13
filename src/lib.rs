@@ -28,7 +28,8 @@ pub struct World<S: Solver> {
     items: Vec<Item<S>>,
     drag: Option<(usize, Vec2, Vec2)>,
     // Reused across RK4 stages; force evaluation itself only reads the bodies.
-    forces: Vec<(Vec2, f32)>,
+    forces: Vec<geom2::pressure::ContactLoad>,
+    contacts: Vec<physics::ContactShape>,
 }
 
 impl<S: Solver> World<S> {
@@ -38,6 +39,7 @@ impl<S: Solver> World<S> {
             items: Vec::new(),
             drag: None,
             forces: Vec::new(),
+            contacts: Vec::new(),
         }
     }
 
