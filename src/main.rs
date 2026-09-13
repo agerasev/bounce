@@ -46,7 +46,7 @@ async fn main(mut window: Window<'_>) {
                 None => {
                     let mut toy_box = World::new(viewport / scale);
                     for _ in 0..8 {
-                        toy_box.insert_item(sample_item(&mut rng, toy_box.size(), &textures));
+                        toy_box.insert_item(sample_item(&mut rng, toy_box.size()));
                     }
                     toy_box
                 }
@@ -79,11 +79,7 @@ async fn main(mut window: Window<'_>) {
                         match key {
                             KeyCode::Escape => break 'frame_loop,
                             KeyCode::Equal | KeyCode::NumpadAdd => {
-                                toy_box.insert_item(sample_item(
-                                    &mut rng,
-                                    toy_box.size(),
-                                    &textures,
-                                ));
+                                toy_box.insert_item(sample_item(&mut rng, toy_box.size()));
                             }
                             KeyCode::Minus | KeyCode::NumpadSubtract => {
                                 if toy_box.n_items() != 0 {
@@ -126,8 +122,9 @@ async fn main(mut window: Window<'_>) {
                         toy_box.drag_move(mouse_pos);
                     }
                 }
-                Event::CursorLeft { .. } => {
+                Event::CursorLeft { .. } | Event::Focused(false) => {
                     mouse_down = false;
+                    toy_box.drag_release();
                 }
                 _ => (),
             }
@@ -152,12 +149,13 @@ async fn main(mut window: Window<'_>) {
         }
 
         {
-            toy_box.draw(&gfx, &mut scene, mode);
+            toy_box.draw(&gfx, &textures, &mut scene, mode);
             if mode == DrawMode::Debug {
-                toy_box.compute_derivs_ext(&mut DrawActor {
+                let mut actor = DrawActor {
                     lib: &gfx,
                     scene: &mut scene,
-                });
+                };
+                toy_box.visit_forces(|pos, force| actor.apply(pos, force));
             }
 
             /*

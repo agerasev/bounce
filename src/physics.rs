@@ -55,6 +55,14 @@ impl Shape {
 }
 
 impl<S: Solver> Item<S> {
+    pub fn contains(&self, pos: Vec2) -> bool {
+        let local = self.rot.inverse().transform(pos - *self.pos);
+        match self.shape {
+            Shape::Circle { radius } => local.length_squared() <= radius * radius,
+            Shape::Rectangle { size } => local.abs().cmple(size).all(),
+        }
+    }
+
     pub fn geometry(&self) -> Either<Disk, Polygon<SmallVec<[Vec2; 4]>>> {
         match self.shape {
             Shape::Circle { radius } => Either::Left(Disk(Circle {
@@ -62,29 +70,23 @@ impl<S: Solver> Item<S> {
                 radius,
             })),
             Shape::Rectangle { size } => {
-                let vertex = Vec2::from_angle(self.rot.angle()).rotate(size);
-                Either::Right(Polygon::<SmallVec<[Vec2; 4]>>::new(SmallVec::from([
-                    *self.pos - vertex,
-                    *self.pos - vertex.perp(),
-                    *self.pos + vertex,
-                    *self.pos + vertex.perp(),
-                ])))
+                let corners = [
+                    -size,
+                    Vec2::new(size.x, -size.y),
+                    size,
+                    Vec2::new(-size.x, size.y),
+                ]
+                .map(|p| *self.pos + self.rot.transform(p));
+                Either::Right(Polygon::<SmallVec<[Vec2; 4]>>::new(SmallVec::from(corners)))
             }
         }
     }
 }
 
-pub trait Actor<S: Solver> {
-    /// Apply force to the specific point of the body.
-    fn apply(&mut self, body: &mut Body<S>, pos: Vec2, force: Vec2);
-}
-
-struct DerivActor;
-impl<S: Solver> Actor<S> for DerivActor {
-    fn apply(&mut self, body: &mut Body<S>, pos: Vec2, force: Vec2) {
-        body.vel.deriv += force / body.mass;
-        body.asp.deriv += torque2(pos - *body.pos, force) / body.inm;
-    }
+#[derive(Clone, Copy)]
+pub struct Force {
+    pub pos: Vec2,
+    pub vector: Vec2,
 }
 
 /// Rigid body
@@ -108,7 +110,7 @@ impl<S: Solver> Body<S> {
     }
 
     /// Influence item by directed deformation `def` at point of contact `pos` moving with velocity `vel`.
-    pub fn contact(&mut self, actor: &mut impl Actor<S>, def: Vec2, pos: Vec2, vel: Vec2) {
+    pub fn contact(&self, def: Vec2, pos: Vec2, vel: Vec2) -> Force {
         let vel = self.vel_at(pos) - vel;
 
         let norm = def.normalize_or_zero();
@@ -122,11 +124,14 @@ impl<S: Solver> Body<S> {
         // Total force
         let total_f = elast_f + damp_f + frict_f;
 
-        actor.apply(self, pos, total_f);
+        Force {
+            pos,
+            vector: total_f,
+        }
     }
 
     /// Pin `loc_pos` point in local item coordinates to `target` point in world space.
-    pub fn attract(&mut self, actor: &mut impl Actor<S>, target: Vec2, self_pos: Vec2) {
+    pub fn attract(&self, target: Vec2, self_pos: Vec2) -> Force {
         let loc_pos = self.rot.transform(self_pos);
         let rel_pos = target - (*self.pos + loc_pos);
         let vel = *self.vel + angular_to_linear2(*self.asp, loc_pos);
@@ -138,16 +143,14 @@ impl<S: Solver> Body<S> {
         // Total force
         let total_f = elast_f + damp_f;
 
-        actor.apply(self, *self.pos + loc_pos, total_f);
+        Force {
+            pos: *self.pos + loc_pos,
+            vector: total_f,
+        }
     }
 }
 
-fn contact_wall<S: Solver>(
-    actor: &mut impl Actor<S>,
-    item: &mut Item<S>,
-    offset: f32,
-    normal: Vec2,
-) {
+fn contact_wall<S: Solver>(item: &Item<S>, offset: f32, normal: Vec2) -> Option<Force> {
     let wall = HalfPlane { normal, offset };
     let overlay = match item.geometry() {
         Either::Left(left) => left.intersect(&wall).map(|x| x.moment()),
@@ -161,12 +164,14 @@ fn contact_wall<S: Solver>(
         let dir = normal;
         let force = overlay.area;
         let poa = overlay.centroid;
-        item.body.contact(actor, dir * force, poa, Vec2::ZERO);
+        Some(item.body.contact(dir * force, poa, Vec2::ZERO))
+    } else {
+        None
     }
 }
 
 impl<S: Solver> Item<S> {
-    pub fn collide(&mut self, other: &mut Self, actor: &mut impl Actor<S>) -> Option<()> {
+    pub fn collide(&self, other: &Self) -> Option<(Force, Force)> {
         let (area, dir, poa) = match (self.geometry(), other.geometry()) {
             (Either::Left(self_circle), Either::Left(other_circle)) => {
                 let overlay = self_circle.intersect(&other_circle)?;
@@ -209,57 +214,81 @@ impl<S: Solver> Item<S> {
 
         if area > AREA_EPS {
             let force = area; // .sqrt();
-            self.contact(actor, -force * dir, poa, other.vel_at(poa));
-            other.contact(actor, force * dir, poa, self.vel_at(poa));
-            Some(())
+            Some((
+                self.contact(-force * dir, poa, other.vel_at(poa)),
+                other.contact(force * dir, poa, self.vel_at(poa)),
+            ))
         } else {
             None
         }
     }
 }
 
-impl<S: Solver> World<S> {
-    pub fn compute_derivs_ext(&mut self, actor: &mut impl Actor<S>) {
-        for item in self.items.iter_mut() {
-            let radius = item.shape.radius();
-            let body = &mut item.body;
-
-            body.pos.deriv += *body.vel;
-            body.rot.deriv += *body.asp;
-
-            // Gravity
-            actor.apply(body, *body.pos, GRAV * body.mass);
-
-            // Air resistance
-            body.vel.deriv += -(AIRF * radius / body.mass) * *body.vel;
-            body.asp.deriv += -(AIRF * radius / body.inm) * *body.asp;
-
-            // Walls
-            let wall_size = self.size - WALL_OFFSET * self.size.min_element();
-            contact_wall(actor, item, -wall_size.x, Vec2::new(1.0, 0.0));
-            contact_wall(actor, item, -wall_size.x, Vec2::new(-1.0, 0.0));
-            contact_wall(actor, item, -wall_size.y, Vec2::new(0.0, 1.0));
-            contact_wall(actor, item, -wall_size.y, Vec2::new(0.0, -1.0));
-        }
-
-        for i in 1..self.items.len() {
-            let (left, other_items) = self.items.split_at_mut(i);
-            let this = left.last_mut().unwrap();
-            for other in other_items {
-                this.collide(other, actor);
+/// Visits linear forces without changing solver variables or their derivatives.
+fn visit_forces<S: Solver>(
+    items: &[Item<S>],
+    size: Vec2,
+    drag: Option<(usize, Vec2, Vec2)>,
+    mut apply: impl FnMut(usize, Force),
+) {
+    let wall = size - WALL_OFFSET * size.min_element();
+    for (i, item) in items.iter().enumerate() {
+        apply(
+            i,
+            Force {
+                pos: *item.pos,
+                vector: GRAV * item.mass - AIRF * item.shape.radius() * *item.vel,
+            },
+        );
+        for (offset, normal) in [
+            (-wall.x, Vec2::X),
+            (-wall.x, Vec2::NEG_X),
+            (-wall.y, Vec2::Y),
+            (-wall.y, Vec2::NEG_Y),
+        ] {
+            if let Some(force) = contact_wall(item, offset, normal) {
+                apply(i, force);
             }
         }
-
-        if let Some((i, target, loc_pos)) = self.drag {
-            let item = &mut self.items[i];
-            item.body.attract(actor, target, loc_pos);
+        for (j, other) in items.iter().enumerate().skip(i + 1) {
+            if let Some((left, right)) = item.collide(other) {
+                apply(i, left);
+                apply(j, right);
+            }
         }
+    }
+    if let Some((i, target, local)) = drag {
+        apply(i, items[i].attract(target, local));
+    }
+}
+
+impl<S: Solver> World<S> {
+    /// Observes linear forces at the current state. Rotational air drag is a pure
+    /// torque, so it has no arrow at a point of application.
+    pub fn visit_forces(&self, mut apply: impl FnMut(Vec2, Vec2)) {
+        visit_forces(&self.items, self.size, self.drag, |_, force| {
+            apply(force.pos, force.vector)
+        });
     }
 }
 
 impl<S: Solver> System<S> for World<S> {
     fn compute_derivs(&mut self, _: &S::Context) {
-        self.compute_derivs_ext(&mut DerivActor);
+        self.forces.clear();
+        self.forces.resize(self.items.len(), (Vec2::ZERO, 0.0));
+        let items = &self.items;
+        visit_forces(items, self.size, self.drag, |i, force| {
+            self.forces[i].0 += force.vector;
+            self.forces[i].1 += torque2(force.pos - *items[i].pos, force.vector);
+        });
+        for (item, &(force, torque)) in self.items.iter_mut().zip(&self.forces) {
+            let radius = item.shape.radius();
+            let body = &mut item.body;
+            body.pos.deriv = *body.vel;
+            body.rot.deriv = *body.asp;
+            body.vel.deriv = force / body.mass;
+            body.asp.deriv = (torque - AIRF * radius * *body.asp) / body.inm;
+        }
     }
     fn visit_vars<V: Visitor<S>>(&mut self, visitor: &mut V) {
         for ent in &mut self.items {
