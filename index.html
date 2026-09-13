@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bounce</title>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #000; }
+    #content { width: 100%; height: 100%; contain: size; }
+    /* Override winit's initial inline pixel size; its ResizeObserver updates
+       the drawing buffer when this viewport-sized layout changes. */
+    canvas { display: block; width: 100% !important; height: 100% !important; outline: none; }
+  </style>
+  
+<script type="module">
+import init, * as bindings from '/bounce/bounce-d55fbf358f0ba08b.js';
+const wasm = await init({ module_or_path: '/bounce/bounce-d55fbf358f0ba08b_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+  
+<link rel="modulepreload" href="/bounce/bounce-d55fbf358f0ba08b.js" crossorigin="anonymous" integrity="sha384-fDaN7RIXTpLiAryluy7CcUiKzmGtLZdHkAAEQ3phZ7BGwGjjx28jgmxz9oNZJ4qC"><link rel="preload" href="/bounce/bounce-d55fbf358f0ba08b_bg.wasm" crossorigin="anonymous" integrity="sha384-YxBR882vmV3muBtNY7HTzJmn7f4Yw1zPp1rzX5U+agJ9Ph+9eLk5C4q8VyIu1DKO" as="fetch" type="application/wasm"></head>
+<body>
+  <div id="content"><canvas id="canvas" tabindex="0" aria-label="Bounce rigid-body playground"></canvas></div>
+  <noscript>Bounce requires JavaScript and WebGL2. Enable JavaScript to play.</noscript>
+</body>
+</html>
