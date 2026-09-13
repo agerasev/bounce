@@ -878,6 +878,7 @@ dependencies = [
  "either",
  "genawaiter",
  "glam",
+ "libm",
 ]
 
 [[package]]
