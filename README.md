@@ -36,7 +36,12 @@ original order; this does not introduce a spatial index or change the force law.
 Damping and viscous friction use three positive quadrature weights per interface
 piece. Their bounded, velocity-dependent tractions have nonpositive relative
 power; equal/opposite forces and moments are applied to both bodies. The normal
-and tangential factors are 0.02 and 0.04. The elastic integral remains analytic.
+and tangential factors are both 2.0 (inverse speed). Each dissipative component
+uses `factor*v / (1 + abs(factor*v))`: it reaches half the local pressure at
+speed 0.5 and remains bounded by that pressure. These stronger defaults shorten
+bouncing and turn sliding balls toward rolling without softening the bodies
+(peak pressure remains 200). This is smooth viscous friction, with no static
+friction threshold. The elastic integral remains analytic.
 Debug arrows include equivalent force couples for independent contact torques.
 
 Walls have an inward-depth linear pressure field. A body completely submerged in
@@ -52,8 +57,10 @@ uses the fixed 240 Hz step; conservativity of the elastic contact law does not
 imply exact finite-step energy conservation.
 
 Run `cargo test --offline --release --lib` for game-integration checks, including
-force/torque symmetry, dissipative power, wall recovery, dragging/resizing, and the
-64-body crowded seed. The `geom2` tests separately verify pressure integrals against
+force/torque symmetry, dissipative power, wall recovery, dragging/resizing, the
+64-body crowded seed, drop settling, and sliding-to-rolling behavior. Damped
+impacts for radii 0.1–0.3 are also compared at 240 Hz and 960 Hz. The `geom2`
+tests separately verify pressure integrals against
 quadrature and independent energy derivatives. Also run the application to check
 the controls, contacts, resizing, and both drawing modes.
 

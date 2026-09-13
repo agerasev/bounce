@@ -230,6 +230,125 @@ fn ordinary_scene_dragging_and_resize_remain_finite() {
     }
 }
 
+#[test]
+fn dropped_bodies_settle_within_five_seconds() {
+    for body in [disk(Vec2::ZERO), rectangle(Vec2::ZERO, 0.3)] {
+        let mut world = World::<Rk4>::new(Vec2::splat(1.0));
+        world.insert_item(body);
+        let mut tail_speed = 0.0_f32;
+        for step in 0..1200 {
+            Rk4.solve_step(&mut world, 1.0 / 240.0);
+            let body = &world.items[0];
+            if step >= 960 {
+                tail_speed = tail_speed.max(body.vel.length() + 0.2 * body.asp.abs());
+            }
+        }
+        eprintln!(
+            "drop {:?}: final-second peak motion {tail_speed}",
+            world.items[0].shape
+        );
+        assert!(
+            tail_speed < 0.05,
+            "body kept bouncing/rocking: {tail_speed}"
+        );
+    }
+}
+
+#[test]
+fn sliding_ball_spins_up_and_reduces_contact_slip() {
+    let mut world = World::<Rk4>::new(Vec2::new(5.0, 1.0));
+    world.insert_item(disk(Vec2::ZERO));
+    // Start at static equilibrium to isolate friction from drop/settling time.
+    let floor_y = world.wall_size().y;
+    let (mut lower, mut upper) = (floor_y - 0.2, floor_y);
+    for _ in 0..32 {
+        let body = &mut world.items[0];
+        body.pos.y = 0.5 * (lower + upper);
+        let support = contact_wall(body, &body.contact_shape(), -floor_y, Vec2::NEG_Y)
+            .unwrap()
+            .load
+            .force
+            .y;
+        if -support < (body.mass * GRAV.y) as f64 {
+            lower = body.pos.y;
+        } else {
+            upper = body.pos.y;
+        }
+    }
+    *world.items[0].vel = Vec2::X;
+    *world.items[0].asp = 0.0;
+    for _ in 0..240 {
+        Rk4.solve_step(&mut world, 1.0 / 240.0);
+    }
+    let body = &world.items[0];
+    let floor = Pressure {
+        geometry: HalfPlane {
+            normal: Vec2::NEG_Y,
+            offset: -world.wall_size().y,
+        },
+        field: PressureField {
+            origin: DVec2::new(0.0, world.wall_size().y as f64),
+            quadratic: 0.0,
+            linear: DVec2::new(0.0, WALL_STIFFNESS),
+            constant: 0.0,
+        },
+    };
+    let mut slip = 0.0;
+    let mut weight = 0.0;
+    body.contact_shape().visit_wall(&floor, &mut |piece| {
+        // Independent midpoint sampling of the whole contact patch.
+        for sample in 0..32 {
+            let (point, normal, pressure) = piece.sample((sample as f64 + 0.5) / 32.0);
+            let w = pressure.max(0.0) * piece.length() * piece.weight / 32.0;
+            slip += w * body.vel_at(point).dot(normal.perp()).abs();
+            weight += w;
+        }
+    });
+    assert!(weight > 0.0, "ball lost floor contact");
+    slip /= weight;
+    eprintln!(
+        "sliding ball after 1 s: vx {}, spin {}, contact slip {slip}",
+        body.vel.x, *body.asp
+    );
+    assert!(*body.asp > 1.0, "ball did not spin up: {}", *body.asp);
+    assert!(body.vel.x > 0.1, "ball stopped instead of rolling");
+    assert!(slip < 0.15, "excessive contact slip: {slip}");
+}
+
+#[test]
+fn damped_impacts_agree_with_a_smaller_timestep() {
+    for radius in [0.1, 0.2, 0.3] {
+        let mut coarse = World::<Rk4>::new(Vec2::new(5.0, 1.0));
+        let mut fine = World::<Rk4>::new(Vec2::new(5.0, 1.0));
+        for world in [&mut coarse, &mut fine] {
+            let mut body = item(Shape::Circle { radius }, Vec2::ZERO, 0.0);
+            body.mass = MASF * radius;
+            body.inm = INMF * body.mass * radius;
+            *body.vel = Vec2::new(0.7, 0.0);
+            world.insert_item(body);
+        }
+        let mut position_error = 0.0_f32;
+        let mut velocity_error = 0.0_f32;
+        for _ in 0..480 {
+            Rk4.solve_step(&mut coarse, 1.0 / 240.0);
+            for _ in 0..4 {
+                Rk4.solve_step(&mut fine, 1.0 / 960.0);
+            }
+            let a = &coarse.items[0];
+            let b = &fine.items[0];
+            assert!(a.pos.is_finite() && a.vel.is_finite() && a.asp.is_finite());
+            position_error = position_error.max((*a.pos - *b.pos).length());
+            velocity_error =
+                velocity_error.max((*a.vel - *b.vel).length() + radius * (*a.asp - *b.asp).abs());
+        }
+        eprintln!(
+            "radius {radius}: timestep position error {position_error}, motion error {velocity_error}"
+        );
+        assert!(position_error < 0.001, "position error {position_error}");
+        assert!(velocity_error < 0.01, "motion error {velocity_error}");
+    }
+}
+
 /// Frozen poses make before/after timings comparable even when trajectories
 /// diverge from floating-point rounding. One RK4 step performs four evaluations.
 #[test]

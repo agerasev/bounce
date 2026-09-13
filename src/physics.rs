@@ -23,9 +23,10 @@ const WALL_STIFFNESS: f64 = 1000.0;
 /// Additional center spring outside the arena: U = 0.5*k*outside_distance².
 /// Finite body pressure alone stops restoring once fully submerged in a wall.
 const WALL_RECOVERY_STIFFNESS: f64 = 4000.0;
-/// Velocity-dependent traction factors; intentionally much lower than before.
-const DAMP: f64 = 0.02;
-const FRICT: f64 = 0.04;
+/// Inverse-speed scales for bounded normal damping and tangential friction.
+/// At speed 1/factor, the dissipative traction reaches half the local pressure.
+const DAMP: f64 = 2.0;
+const FRICT: f64 = 2.0;
 /// Dragging is an independent point spring.
 const MOUSE_STIFFNESS: f32 = 200.0;
 const MOUSE_DAMP: f32 = 4.0;
