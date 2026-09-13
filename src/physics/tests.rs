@@ -1,8 +1,12 @@
 use super::*;
 use crate::sample_item;
 use phy::{Rk4, Solver};
-use rand::{SeedableRng, rngs::SmallRng};
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rgb::Rgb;
+
+thread_local! {
+    pub(super) static INTERFACE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 fn item(shape: Shape, position: Vec2, angle: f32) -> Item<Rk4> {
     Item {
@@ -223,5 +227,170 @@ fn ordinary_scene_dragging_and_resize_remain_finite() {
     }
     for item in &world.items {
         assert!(item.pos.abs().max_element() < 0.8);
+    }
+}
+
+/// Frozen poses make before/after timings comparable even when trajectories
+/// diverge from floating-point rounding. One RK4 step performs four evaluations.
+#[test]
+#[ignore = "manual release-mode contact benchmark"]
+fn benchmark_contact_evaluation() {
+    use std::{hint::black_box, time::Instant};
+    for (label, bodies, half_size, repetitions) in [
+        ("8 ordinary", 8, Vec2::new(1.8, 1.3), 2000),
+        ("64 sparse", 64, Vec2::splat(4.0), 500),
+        ("64 packed", 64, Vec2::splat(0.5), 30),
+        ("256 sparse", 256, Vec2::splat(8.0), 100),
+    ] {
+        let mut rng = SmallRng::seed_from_u64(0xdeadbeef);
+        let mut world = World::<Rk4>::new(half_size);
+        for _ in 0..bodies {
+            let mut item = sample_item(&mut rng, world.wall_size());
+            // Include rotated rectangles, not just the default aligned spawn.
+            *item.rot = Rot2::from_angle(rng.random_range(-1.0..1.0));
+            world.insert_item(item);
+        }
+        Rk4.solve_step(&mut world, 0.0);
+        INTERFACE_CALLS.with(|count| count.set(0));
+        Rk4.solve_step(&mut world, 0.0);
+        let calls = INTERFACE_CALLS.with(|count| count.get() / 4);
+        let mut samples = [0.0; 3];
+        for time in &mut samples {
+            let start = Instant::now();
+            for _ in 0..repetitions {
+                Rk4.solve_step(black_box(&mut world), 0.0);
+                black_box(&world.forces);
+            }
+            *time = start.elapsed().as_secs_f64() * 1e6 / (4 * repetitions) as f64;
+        }
+        samples.sort_by(f64::total_cmp);
+        eprintln!(
+            "{label}: {:.2} us/evaluation, {calls} interface calls/evaluation (median of 3)",
+            samples[1]
+        );
+    }
+}
+
+/// Reference path uses original geom2 domains, with neither cached constraints
+/// nor any body/cell bounds. This checks both optimizations against full contact.
+struct OriginalDomain<'a>(&'a dyn PressureDomain);
+
+impl PressureDomain for OriginalDomain<'_> {
+    fn constraints(
+        &self,
+        visit: &mut dyn FnMut(PressureField, BoundaryOwnership),
+    ) -> Result<(), PressureError> {
+        self.0.constraints(visit)
+    }
+}
+
+fn original_cells(shape: &ContactShape) -> Vec<Pressure<OriginalDomain<'_>>> {
+    fn original<G: PressureDomain, const N: usize>(
+        cell: &ContactCell<G, N>,
+    ) -> Pressure<OriginalDomain<'_>> {
+        Pressure {
+            geometry: OriginalDomain(&cell.pressure.geometry.geometry),
+            field: cell.pressure.field,
+        }
+    }
+    match &shape.cells {
+        ContactCells::Disk(cell) => vec![original(cell)],
+        ContactCells::Rectangle(cells) => cells.iter().map(original).collect(),
+    }
+}
+
+#[test]
+fn bounds_and_prepared_domains_preserve_exhaustive_pair_loads() {
+    let mut rng = SmallRng::seed_from_u64(0xaabb);
+    let mut items: Vec<Item<Rk4>> = (0..40)
+        .map(|_| {
+            let mut item = sample_item(&mut rng, Vec2::splat(1.0));
+            *item.rot = Rot2::from_angle(rng.random_range(-3.0..3.0));
+            *item.vel = Vec2::new(rng.random_range(-2.0..2.0), rng.random_range(-2.0..2.0));
+            *item.asp = rng.random_range(-5.0..5.0);
+            item
+        })
+        .collect();
+    items.extend([
+        disk(Vec2::ZERO),
+        disk(Vec2::new(0.4, 0.0)),
+        disk(Vec2::new(0.3999, 0.0)),
+        rectangle(Vec2::ZERO, 0.0),
+        rectangle(Vec2::new(0.2, 0.0), 0.0),
+        item(
+            Shape::Rectangle {
+                size: Vec2::new(0.7, 0.02),
+            },
+            Vec2::new(0.2, 0.2),
+            0.7,
+        ),
+    ]);
+    let shapes: Vec<_> = items.iter().map(Item::contact_shape).collect();
+    let mut fast_calls = 0;
+    let mut reference_calls = 0;
+    for (i, a) in items.iter().enumerate() {
+        for (j, b) in items.iter().enumerate().skip(i + 1) {
+            let reference = a.pos.as_dvec2() + 0.5 * (b.pos.as_dvec2() - a.pos.as_dvec2());
+            INTERFACE_CALLS.with(|count| count.set(0));
+            let actual = contact_pair(a, &shapes[i], b, &shapes[j])
+                .map_or(ContactLoad::default(), |load| load.about(reference));
+            fast_calls += INTERFACE_CALLS.with(|count| count.get());
+            let mut expected = ContactLoad::default();
+            INTERFACE_CALLS.with(|count| count.set(0));
+            for left in &original_cells(&shapes[i]) {
+                for right in &original_cells(&shapes[j]) {
+                    visit_interface(left, right, &mut |piece| {
+                        expected += piece_load(piece, &a.body, Some(&b.body), reference);
+                    });
+                }
+            }
+            reference_calls += INTERFACE_CALLS.with(|count| count.get());
+            close(actual.force.x, expected.force.x, 1e-9);
+            close(actual.force.y, expected.force.y, 1e-9);
+            close(actual.torque, expected.torque, 1e-9);
+        }
+    }
+    assert!(
+        fast_calls < reference_calls / 2,
+        "{fast_calls} versus {reference_calls}"
+    );
+}
+
+#[test]
+fn wall_bounds_preserve_every_orientation_of_pressure_contact() {
+    for angle in [0.0, 0.1, 0.8, 1.5, 2.7] {
+        for body in [
+            disk(Vec2::new(0.3, -0.4)),
+            rectangle(Vec2::new(0.3, -0.4), angle),
+        ] {
+            let shape = body.contact_shape();
+            for normal in [Vec2::X, Vec2::NEG_X, Vec2::Y, Vec2::NEG_Y] {
+                // Center stays inside so this isolates pressure contact from
+                // the additional outside-center wall recovery spring.
+                let offset = body.pos.dot(normal) - 0.05;
+                let wall = Pressure {
+                    geometry: HalfPlane { normal, offset },
+                    field: PressureField {
+                        origin: (normal * offset).as_dvec2(),
+                        quadratic: 0.0,
+                        linear: -WALL_STIFFNESS * normal.as_dvec2(),
+                        constant: 0.0,
+                    },
+                };
+                let reference = body.pos.as_dvec2();
+                let actual = contact_wall(&body, &shape, offset, normal)
+                    .unwrap()
+                    .about(reference);
+                let mut expected = ContactLoad::default();
+                for cell in &original_cells(&shape) {
+                    visit_interface(cell, &wall, &mut |piece| {
+                        expected += piece_load(piece, &body.body, None, reference)
+                    });
+                }
+                close(actual.force.x, expected.force.x, 1e-9);
+                close(actual.force.y, expected.force.y, 1e-9);
+                close(actual.torque, expected.torque, 1e-9);
+            }
+        }
     }
 }

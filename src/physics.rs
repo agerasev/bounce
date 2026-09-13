@@ -2,8 +2,8 @@ use super::{Item, World};
 use geom2::{
     Disk, HalfPlane, Polygon,
     pressure::{
-        ContactLoad, ContactPiece, Interface, Pressure, PressureDomain, PressureError,
-        PressureField,
+        BoundaryOwnership, ContactLoad, ContactPiece, Interface, Pressure, PressureDomain,
+        PressureError, PressureField,
     },
 };
 use glam::{DVec2, Vec2};
@@ -31,7 +31,106 @@ const MOUSE_STIFFNESS: f32 = 200.0;
 const MOUSE_DAMP: f32 = 4.0;
 pub const WALL_OFFSET: f32 = 0.04;
 
-type Triangle = Pressure<Polygon<[Vec2; 3]>>;
+type Triangle = ContactCell<Polygon<[Vec2; 3]>, 3>;
+
+/// Bounds of the actual pressure geometry, rebuilt at every RK4 stage.
+#[derive(Clone, Copy, Debug)]
+struct Aabb {
+    min: DVec2,
+    max: DVec2,
+}
+
+impl Aabb {
+    fn points(points: &[Vec2]) -> Self {
+        let mut bounds = Self {
+            min: DVec2::INFINITY,
+            max: DVec2::NEG_INFINITY,
+        };
+        for point in points {
+            bounds.min = bounds.min.min(point.as_dvec2());
+            bounds.max = bounds.max.max(point.as_dvec2());
+        }
+        bounds
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        // Keep touching boxes: shared cell edges can carry nonzero pressure.
+        self.min.cmple(other.max).all() && other.min.cmple(self.max).all()
+    }
+
+    fn intersects_wall(self, normal: Vec2, offset: f32) -> bool {
+        let nearest = DVec2::new(
+            if normal.x >= 0.0 {
+                self.min.x
+            } else {
+                self.max.x
+            },
+            if normal.y >= 0.0 {
+                self.min.y
+            } else {
+                self.max.y
+            },
+        );
+        nearest.dot(normal.as_dvec2()) <= offset as f64
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ContactCell<G, const N: usize> {
+    pressure: Pressure<PreparedDomain<G, N>>,
+    bounds: Aabb,
+}
+
+/// Clipping rescans boundaries. Prepare validated constraints once per RK4
+/// stage instead of reconstructing them on every scan of every cell pair.
+#[derive(Clone, Debug)]
+struct PreparedDomain<G, const N: usize> {
+    geometry: G,
+    constraints: [(PressureField, BoundaryOwnership); N],
+}
+
+impl<G, const N: usize> PressureDomain for PreparedDomain<G, N> {
+    fn constraints(
+        &self,
+        visit: &mut dyn FnMut(PressureField, BoundaryOwnership),
+    ) -> Result<(), PressureError> {
+        for &(field, ownership) in &self.constraints {
+            visit(field, ownership);
+        }
+        Ok(())
+    }
+}
+
+impl<G: PressureDomain, const N: usize> ContactCell<G, N> {
+    fn new(pressure: Pressure<G>, bounds: Aabb) -> Self {
+        let zero = PressureField {
+            origin: DVec2::ZERO,
+            quadratic: 0.0,
+            linear: DVec2::ZERO,
+            constant: 0.0,
+        };
+        let mut constraints = [(zero, BoundaryOwnership::Closed); N];
+        let mut count = 0;
+        pressure
+            .geometry
+            .constraints(&mut |field, ownership| {
+                constraints[count] = (field, ownership);
+                count += 1;
+            })
+            .expect("body pressure geometry must be valid");
+        assert_eq!(count, N);
+        Self {
+            pressure: Pressure {
+                geometry: PreparedDomain {
+                    geometry: pressure.geometry,
+                    constraints,
+                },
+                field: pressure.field,
+            },
+            bounds,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum Shape {
@@ -46,19 +145,18 @@ impl Shape {
             Shape::Rectangle { size } => size.min_element(),
         }
     }
-
-    fn bounding_radius(&self) -> f32 {
-        match self {
-            Shape::Circle { radius } => *radius,
-            Shape::Rectangle { size } => size.length(),
-        }
-    }
 }
 
 /// Rebuilt once per derivative evaluation, then reused by all pair contacts.
 #[derive(Clone, Debug)]
-pub(crate) enum ContactShape {
-    Disk(Pressure<Disk>),
+pub(crate) struct ContactShape {
+    bounds: Aabb,
+    cells: ContactCells,
+}
+
+#[derive(Clone, Debug)]
+enum ContactCells {
+    Disk(ContactCell<Disk, 1>),
     Rectangle([Triangle; 4]),
 }
 
@@ -73,10 +171,18 @@ impl<S: Solver> Item<S> {
 
     fn contact_shape(&self) -> ContactShape {
         match self.shape {
-            Shape::Circle { radius } => ContactShape::Disk(
-                Pressure::disk(Disk::new(*self.pos, radius), PRESSURE)
-                    .expect("body must have finite position and positive size"),
-            ),
+            Shape::Circle { radius } => {
+                let pressure = Pressure::disk(Disk::new(*self.pos, radius), PRESSURE)
+                    .expect("body must have finite position and positive size");
+                let bounds = Aabb {
+                    min: self.pos.as_dvec2() - DVec2::splat(radius as f64),
+                    max: self.pos.as_dvec2() + DVec2::splat(radius as f64),
+                };
+                ContactShape {
+                    bounds,
+                    cells: ContactCells::Disk(ContactCell::new(pressure, bounds)),
+                }
+            }
             Shape::Rectangle { size } => {
                 let rotation = self.rot.matrix();
                 let corners = [
@@ -86,13 +192,20 @@ impl<S: Solver> Item<S> {
                     Vec2::new(-size.x, size.y),
                 ]
                 .map(|p| *self.pos + rotation * p);
-                ContactShape::Rectangle(core::array::from_fn(|i| {
-                    Pressure::triangle(
-                        Polygon::new([corners[i], corners[(i + 1) % 4], *self.pos]),
-                        [0.0, 0.0, PRESSURE],
-                    )
-                    .expect("body must have finite position and nondegenerate rectangle geometry")
-                }))
+                ContactShape {
+                    bounds: Aabb::points(&corners),
+                    cells: ContactCells::Rectangle(core::array::from_fn(|i| {
+                        let vertices = [corners[i], corners[(i + 1) % 4], *self.pos];
+                        let pressure = Pressure::triangle(
+                            Polygon::new(vertices),
+                            [0.0, 0.0, PRESSURE],
+                        )
+                        .expect(
+                            "body must have finite position and nondegenerate rectangle geometry",
+                        );
+                        ContactCell::new(pressure, Aabb::points(&vertices))
+                    })),
+                }
             }
         }
     }
@@ -165,6 +278,8 @@ fn visit_interface<G: PressureDomain, H: PressureDomain>(
     b: &Pressure<H>,
     visit: &mut impl FnMut(ContactPiece),
 ) {
+    #[cfg(test)]
+    tests::INTERFACE_CALLS.with(|count| count.set(count.get() + 1));
     match a.interface(b) {
         Ok(interface) => interface.for_each(visit),
         // No normal exists on identical field polynomials. Choose zero on the
@@ -178,22 +293,32 @@ fn visit_interface<G: PressureDomain, H: PressureDomain>(
 
 impl ContactShape {
     fn visit_pair(&self, other: &Self, visit: &mut impl FnMut(ContactPiece)) {
-        match (self, other) {
-            (Self::Disk(a), Self::Disk(b)) => visit_interface(a, b, visit),
-            (Self::Disk(a), Self::Rectangle(bs)) => {
+        match (&self.cells, &other.cells) {
+            (ContactCells::Disk(a), ContactCells::Disk(b)) => {
+                // Circles reject diagonal false positives left by their AABBs.
+                let a_disk = &a.pressure.geometry.geometry;
+                let b_disk = &b.pressure.geometry.geometry;
+                let reach = a_disk.radius as f64 + b_disk.radius as f64;
+                if (a_disk.center.as_dvec2() - b_disk.center.as_dvec2()).length_squared()
+                    <= reach * reach
+                {
+                    visit_cell_pair(a, b, visit);
+                }
+            }
+            (ContactCells::Disk(a), ContactCells::Rectangle(bs)) => {
                 for b in bs {
-                    visit_interface(a, b, visit);
+                    visit_cell_pair(a, b, visit);
                 }
             }
-            (Self::Rectangle(as_), Self::Disk(b)) => {
+            (ContactCells::Rectangle(as_), ContactCells::Disk(b)) => {
                 for a in as_ {
-                    visit_interface(a, b, visit);
+                    visit_cell_pair(a, b, visit);
                 }
             }
-            (Self::Rectangle(as_), Self::Rectangle(bs)) => {
+            (ContactCells::Rectangle(as_), ContactCells::Rectangle(bs)) => {
                 for a in as_ {
                     for b in bs {
-                        visit_interface(a, b, visit);
+                        visit_cell_pair(a, b, visit);
                     }
                 }
             }
@@ -201,14 +326,29 @@ impl ContactShape {
     }
 
     fn visit_wall(&self, wall: &Pressure<HalfPlane>, visit: &mut impl FnMut(ContactPiece)) {
-        match self {
-            Self::Disk(a) => visit_interface(a, wall, visit),
-            Self::Rectangle(cells) => {
+        match &self.cells {
+            ContactCells::Disk(a) => visit_interface(&a.pressure, wall, visit),
+            ContactCells::Rectangle(cells) => {
                 for cell in cells {
-                    visit_interface(cell, wall, visit);
+                    if cell
+                        .bounds
+                        .intersects_wall(wall.geometry.normal, wall.geometry.offset)
+                    {
+                        visit_interface(&cell.pressure, wall, visit);
+                    }
                 }
             }
         }
+    }
+}
+
+fn visit_cell_pair<G: PressureDomain, H: PressureDomain, const N: usize, const M: usize>(
+    a: &ContactCell<G, N>,
+    b: &ContactCell<H, M>,
+    visit: &mut impl FnMut(ContactPiece),
+) {
+    if a.bounds.overlaps(b.bounds) {
+        visit_interface(&a.pressure, &b.pressure, visit);
     }
 }
 
@@ -254,8 +394,7 @@ fn contact_pair<S: Solver>(
     b: &Item<S>,
     b_shape: &ContactShape,
 ) -> Option<AppliedLoad> {
-    let reach = a.shape.bounding_radius() as f64 + b.shape.bounding_radius() as f64;
-    if (a.pos.as_dvec2() - b.pos.as_dvec2()).length_squared() >= reach * reach {
+    if !a_shape.bounds.overlaps(b_shape.bounds) {
         return None;
     }
     let reference = a.pos.as_dvec2() + 0.5 * (b.pos.as_dvec2() - a.pos.as_dvec2());
@@ -275,7 +414,7 @@ fn contact_wall<S: Solver>(
     offset: f32,
     normal: Vec2,
 ) -> Option<AppliedLoad> {
-    if item.pos.dot(normal) - item.shape.bounding_radius() >= offset {
+    if !shape.bounds.intersects_wall(normal, offset) {
         return None;
     }
     let wall = Pressure {

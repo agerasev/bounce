@@ -26,8 +26,12 @@ Contacts use quadratic radial pressure fields for circles and a continuous
 four-triangle pressure fan for rectangles. Equal-pressure line/arc interfaces are
 integrated analytically for elastic force **and torque**, using `f64` accumulators.
 The peak pressure is 200; it is a material parameter, not the previous multiplier
-of overlap area. Geometry is rebuilt once per RK4 stage, with a body bounding-circle
-check before pairwise contact work.
+of overlap area. Geometry, body/cell AABBs, and validated domain constraints are
+rebuilt once per RK4 stage. Separated body boxes, cell boxes, and wall/cell boxes
+are rejected before interface calculation. Disk pairs also retain an exact
+center-distance check. Touching boxes are retained so shared cell boundaries
+cannot lose contact contributions. Body pairs are still enumerated in their
+original order; this does not introduce a spatial index or change the force law.
 
 Damping and viscous friction use three positive quadrature weights per interface
 piece. Their bounded, velocity-dependent tractions have nonpositive relative
@@ -52,3 +56,33 @@ force/torque symmetry, dissipative power, wall recovery, dragging/resizing, and 
 64-body crowded seed. The `geom2` tests separately verify pressure integrals against
 quadrature and independent energy derivatives. Also run the application to check
 the controls, contacts, resizing, and both drawing modes.
+
+## Contact performance
+
+Run the reproducible, opt-in benchmark with:
+
+```sh
+cargo test --offline --release --lib benchmark_contact_evaluation -- --ignored --nocapture
+```
+
+It uses fixed seeded poses (including rotated rectangles) and zero-duration RK4
+steps, preventing trajectory differences from changing the measured workload.
+Times include preparing geometry/constraints and are divided by the four force
+evaluations in each RK4 step. It reports the median of three runs; these are
+physics timings, not rendering times or FPS.
+
+On the development machine, before/after adding body/cell AABBs and cached domain
+constraints:
+
+| Scene | Before, µs/evaluation | After, µs/evaluation | Interface calls before → after |
+|---|---:|---:|---:|
+| 8 bodies, ordinary arena | 18.38 | 6.77 | 28 → 16 |
+| 64 bodies, sparse | 94.31 | 50.95 | 134 → 61 |
+| 64 bodies, packed | 7889.99 | 3527.85 | 10276 → 6048 |
+| 256 bodies, sparse | 689.40 | 413.94 | 816 → 363 |
+
+Pair enumeration remains O(n²). AABBs remove unnecessary narrow-phase work, but
+cannot remove real contacts in a dense overlap. In particular, the packed
+benchmark still exceeds the CPU budget for real-time 240 Hz stepping on this
+machine. A spatial grid or sweep would address pair enumeration for larger sparse
+scenes; heavily overlapping scenes remain dominated by contact calculations.
