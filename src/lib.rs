@@ -63,7 +63,7 @@ impl<S: Solver> Item<S> {
                 );
             }
             DrawMode::Debug => match &self.shape {
-                Shape::Circle { radius } => {
+                Shape::Circle { .. } => {
                     /*
                     draw_circle_lines(
                         self.pos.x,

@@ -1,8 +1,8 @@
 use super::{Item, World};
 use either::Either;
 use geom2::{
-    ArcVertex, Circle, Disk, HalfPlane, Integrable, Intersect, IntersectTo, LineSegment, Meta,
-    MetaArcPolygon, MetaPolygon, Moment, Polygon,
+    ArcVertex, Circle, Disk, HalfPlane, Integrable, Intersect, IntersectTo, Meta, MetaArcPolygon,
+    MetaPolygon, Moment, Polygon,
 };
 use glam::Vec2;
 use phy::{Rot2, Solver, System, Var, Visitor, angular_to_linear2, torque2};

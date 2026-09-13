@@ -15,10 +15,9 @@ use wgame::{
         keyboard::{KeyCode, PhysicalKey},
     },
     prelude::*,
-    typography::TextAlign,
 };
 
-#[wgame::window(title = "Wgame example", size = (1200, 900), resizable = true, vsync = true)]
+#[wgame::window(title = "Bounce", size = (1200, 900), resizable = true, vsync = true)]
 async fn main(mut window: Window<'_>) {
     let gfx = Library::new(window.graphics());
 
