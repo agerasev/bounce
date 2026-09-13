@@ -21,6 +21,7 @@ use wgame::{
 
 const SEED: u64 = 0xdeadbeef;
 const SCALE: f32 = 640.0;
+const HEADER_HEIGHT: f32 = 64.0;
 const STEP: Duration = Duration::from_nanos(4_166_667);
 const MAX_STEPS: u32 = 24;
 
@@ -61,10 +62,14 @@ async fn main(mut window: Window<'_>) -> Result<()> {
     'frames: while let Some(mut frame) = window.next_frame().await? {
         let size = frame.size();
         let viewport = Vec2::new(size.0 as f32, size.1 as f32);
+        // The HUD occupies its own strip above the simulation's viewport.
+        let header_height = HEADER_HEIGHT.min(viewport.y);
+        let playground = Vec2::new(viewport.x, viewport.y - header_height);
+        let playground_origin = Vec2::new(0.0, header_height);
         let mut reset_clock = false;
-        let world = world.get_or_insert_with(|| reset(viewport / SCALE, &mut rng));
+        let world = world.get_or_insert_with(|| reset(playground / SCALE, &mut rng));
         if frame.resized().is_some() {
-            world.resize(viewport / SCALE);
+            world.resize(playground / SCALE);
             reset_clock = true;
         }
         let camera = frame
@@ -72,7 +77,7 @@ async fn main(mut window: Window<'_>) -> Result<()> {
             .transform(Affine2::from_scale_angle_translation(
                 Vec2::splat(0.5 * SCALE),
                 0.0,
-                0.5 * viewport,
+                playground_origin + 0.5 * playground,
             ));
         while let Some(event) = events.try_next() {
             match event {
@@ -105,7 +110,7 @@ async fn main(mut window: Window<'_>) -> Result<()> {
                                 reset_clock = true;
                             }
                             KeyCode::KeyR => {
-                                *world = reset(viewport / SCALE, &mut rng);
+                                *world = reset(playground / SCALE, &mut rng);
                                 reset_clock = true;
                             }
                             _ => (),
@@ -118,7 +123,10 @@ async fn main(mut window: Window<'_>) -> Result<()> {
                     ..
                 } => match state {
                     ElementState::Pressed => {
-                        if let Some(pos) = mouse.and_then(|pos| camera.screen_to_world(pos, size)) {
+                        if let Some(pos) = mouse
+                            .filter(|pos: &Vec2| pos.y >= header_height && playground.y > 0.0)
+                            .and_then(|pos| camera.screen_to_world(pos, size))
+                        {
                             world.drag_acquire(pos);
                         }
                     }
@@ -127,7 +135,9 @@ async fn main(mut window: Window<'_>) -> Result<()> {
                 Event::CursorMoved { position, .. } => {
                     let pixel = Vec2::new(position.x as f32, position.y as f32);
                     mouse = Some(pixel);
-                    if let Some(pos) = camera.screen_to_world(pixel, size) {
+                    if pixel.y < header_height {
+                        world.drag_release();
+                    } else if let Some(pos) = camera.screen_to_world(pixel, size) {
                         world.drag_move(pos);
                     }
                 }
@@ -144,7 +154,7 @@ async fn main(mut window: Window<'_>) -> Result<()> {
             }
         }
         let now = Instant::now();
-        if reset_clock || paused || !focused {
+        if reset_clock || paused || !focused || playground.y == 0.0 {
             accumulated = Duration::ZERO;
         } else {
             let elapsed = (now - last).min(STEP * MAX_STEPS);
@@ -165,7 +175,9 @@ async fn main(mut window: Window<'_>) -> Result<()> {
         });
         let mut scene = frame.scene();
         scene.camera = camera;
-        world.draw(&gfx, &textures, &mut scene, mode);
+        if playground.y > 0.0 {
+            world.draw(&gfx, &textures, &mut scene, mode);
+        }
         scene.render();
 
         let label = format!(
@@ -189,7 +201,7 @@ async fn main(mut window: Window<'_>) -> Result<()> {
         overlay.camera = camera;
         overlay.add(
             &gfx.shapes()
-                .rectangle((Vec2::ZERO, Vec2::new(viewport.x, 64.0)))
+                .rectangle((Vec2::ZERO, Vec2::new(viewport.x, header_height)))
                 .fill_color(color::BLACK),
         );
         overlay.add(&status.scale(raster.size()).move_to(Vec2::new(12.0, 24.0)));
