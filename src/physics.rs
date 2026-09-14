@@ -170,6 +170,10 @@ impl<S: Solver> Item<S> {
         }
     }
 
+    fn air_torque(&self) -> f64 {
+        -(AIRF * self.shape.radius() * *self.asp) as f64
+    }
+
     fn contact_shape(&self) -> ContactShape {
         match self.shape {
             Shape::Circle { radius } => {
@@ -246,7 +250,73 @@ impl AppliedLoad {
             },
         }
     }
+
+    fn with_reference(self, pos: DVec2) -> Self {
+        Self {
+            pos,
+            load: self.about(pos),
+        }
+    }
+
+    /// Draw the resultant on its line of action, at the point nearest `pos`.
+    /// A pure torque has no single-force representation and needs a couple.
+    fn visit_forces(self, arm: f64, mut apply: impl FnMut(Vec2, Vec2)) {
+        let ContactLoad { force, torque } = self.load;
+        let force_squared = force.length_squared();
+        if force_squared > 0.0 {
+            // r × F = torque; translating along F leaves the moment unchanged.
+            let point = self.pos - force.perp() * (torque / force_squared);
+            if point.as_vec2().is_finite() {
+                apply(point.as_vec2(), force.as_vec2());
+                return;
+            }
+        }
+        // Also retain a finite representation when a tiny resultant would put
+        // its application point outside the renderer's numeric range.
+        if force != DVec2::ZERO {
+            apply(self.pos.as_vec2(), force.as_vec2());
+        }
+        if torque != 0.0 {
+            let couple = DVec2::X * (torque / (2.0 * arm));
+            apply((self.pos - arm * DVec2::Y).as_vec2(), couple.as_vec2());
+            apply((self.pos + arm * DVec2::Y).as_vec2(), -couple.as_vec2());
+        }
+    }
 }
+
+/// A contact-based anchor for the equivalent force arrow. Only collected for
+/// debug observation, using the same positive quadrature as contact damping.
+/// This locates the arrow; it does not approximate its force or moment.
+#[derive(Default)]
+struct ContactCenter {
+    weight: f64,
+    moment: DVec2,
+}
+
+impl ContactCenter {
+    fn add(&mut self, piece: ContactPiece, reference: DVec2) {
+        for (fraction, weight) in CONTACT_QUADRATURE {
+            let (point, _, pressure) = piece.sample(fraction);
+            let weight = pressure.max(0.0) * piece.length() * piece.weight * weight;
+            self.weight += weight;
+            self.moment += weight * (point - reference);
+        }
+    }
+
+    fn point(self, reference: DVec2) -> DVec2 {
+        if self.weight > 0.0 {
+            reference + self.moment / self.weight
+        } else {
+            reference
+        }
+    }
+}
+
+const CONTACT_QUADRATURE: [(f64, f64); 3] = [
+    (0.1127016653792583, 5.0 / 18.0),
+    (0.5, 4.0 / 9.0),
+    (0.8872983346207417, 5.0 / 18.0),
+];
 
 #[derive(Clone, Default)]
 pub struct Body<S: Solver> {
@@ -363,11 +433,7 @@ fn piece_load<S: Solver>(
     reference: DVec2,
 ) -> ContactLoad {
     let mut total = piece.integrate(reference);
-    for (fraction, weight) in [
-        (0.1127016653792583, 5.0 / 18.0),
-        (0.5, 4.0 / 9.0),
-        (0.8872983346207417, 5.0 / 18.0),
-    ] {
+    for (fraction, weight) in CONTACT_QUADRATURE {
         let (point, normal, pressure) = piece.sample(fraction);
         let velocity = a.vel_at(point) - b.map_or(DVec2::ZERO, |b| b.vel_at(point));
         let tangent = normal.perp();
@@ -389,7 +455,7 @@ fn piece_load<S: Solver>(
     total
 }
 
-fn contact_pair<S: Solver>(
+fn contact_pair<S: Solver, const DISPLAY: bool>(
     a: &Item<S>,
     a_shape: &ContactShape,
     b: &Item<S>,
@@ -400,16 +466,25 @@ fn contact_pair<S: Solver>(
     }
     let reference = a.pos.as_dvec2() + 0.5 * (b.pos.as_dvec2() - a.pos.as_dvec2());
     let mut total = ContactLoad::default();
+    let mut center = ContactCenter::default();
     a_shape.visit_pair(b_shape, &mut |piece| {
-        total += piece_load(piece, &a.body, Some(&b.body), reference)
+        total += piece_load(piece, &a.body, Some(&b.body), reference);
+        if DISPLAY {
+            center.add(piece, reference);
+        }
     });
-    Some(AppliedLoad {
+    let load = AppliedLoad {
         pos: reference,
         load: total,
+    };
+    Some(if DISPLAY {
+        load.with_reference(center.point(reference))
+    } else {
+        load
     })
 }
 
-fn contact_wall<S: Solver>(
+fn contact_wall<S: Solver, const DISPLAY: bool>(
     item: &Item<S>,
     shape: &ContactShape,
     offset: f32,
@@ -429,8 +504,12 @@ fn contact_wall<S: Solver>(
     };
     let reference = item.pos.as_dvec2();
     let mut total = ContactLoad::default();
+    let mut center = ContactCenter::default();
     shape.visit_wall(&wall, &mut |piece| {
-        total += piece_load(piece, &item.body, None, reference)
+        total += piece_load(piece, &item.body, None, reference);
+        if DISPLAY {
+            center.add(piece, reference);
+        }
     });
     let outside = offset as f64 - reference.dot(normal.as_dvec2());
     if outside > 0.0 {
@@ -441,13 +520,18 @@ fn contact_wall<S: Solver>(
             * (outside / item.shape.radius() as f64).min(1.0);
         total.force += normal.as_dvec2() * (elastic - damping * speed).max(0.0);
     }
-    Some(AppliedLoad {
+    let load = AppliedLoad {
         pos: reference,
         load: total,
+    };
+    Some(if DISPLAY {
+        load.with_reference(center.point(reference))
+    } else {
+        load
     })
 }
 
-fn visit_loads<S: Solver>(
+fn visit_loads<S: Solver, const DISPLAY: bool>(
     items: &[Item<S>],
     shapes: &[ContactShape],
     wall: Vec2,
@@ -468,12 +552,12 @@ fn visit_loads<S: Solver>(
             (-wall.y, Vec2::Y),
             (-wall.y, Vec2::NEG_Y),
         ] {
-            if let Some(load) = contact_wall(item, &shapes[i], offset, normal) {
+            if let Some(load) = contact_wall::<_, DISPLAY>(item, &shapes[i], offset, normal) {
                 apply(i, load);
             }
         }
         for (j, other) in items.iter().enumerate().skip(i + 1) {
-            if let Some(load) = contact_pair(item, &shapes[i], other, &shapes[j]) {
+            if let Some(load) = contact_pair::<_, DISPLAY>(item, &shapes[i], other, &shapes[j]) {
                 apply(i, load);
                 apply(j, load.opposite());
             }
@@ -485,26 +569,33 @@ fn visit_loads<S: Solver>(
 }
 
 impl<S: Solver> World<S> {
-    /// Observe forces immutably. Independent contact torques are represented by
-    /// equivalent force couples, so debug arrows retain the full contact load.
-    /// Rotational air drag remains omitted from the arrows.
+    /// Observe forces immutably. Each nonzero resultant is placed on its line
+    /// of action near the pressure-weighted contact center, reproducing the
+    /// full contact torque with a single arrow.
+    /// Pure torques require force couples instead.
+    /// Rotational air drag is also shown as a pure torque.
     pub fn visit_forces(&self, mut apply: impl FnMut(Vec2, Vec2)) {
         let shapes: Vec<_> = self.items.iter().map(Item::contact_shape).collect();
-        visit_loads(
+        visit_loads::<_, true>(
             &self.items,
             &shapes,
             self.wall_size(),
             self.drag,
             |i, load| {
-                apply(load.pos.as_vec2(), load.load.force.as_vec2());
                 let arm = 0.5 * self.items[i].shape.radius() as f64;
-                let force = DVec2::X * (load.load.torque / (2.0 * arm));
-                if force != DVec2::ZERO {
-                    apply((load.pos - arm * DVec2::Y).as_vec2(), force.as_vec2());
-                    apply((load.pos + arm * DVec2::Y).as_vec2(), -force.as_vec2());
-                }
+                load.visit_forces(arm, &mut apply);
             },
         );
+        for item in &self.items {
+            AppliedLoad {
+                pos: item.pos.as_dvec2(),
+                load: ContactLoad {
+                    force: DVec2::ZERO,
+                    torque: item.air_torque(),
+                },
+            }
+            .visit_forces(0.5 * item.shape.radius() as f64, &mut apply);
+        }
     }
 }
 
@@ -517,17 +608,16 @@ impl<S: Solver> System<S> for World<S> {
             .extend(self.items.iter().map(Item::contact_shape));
         let wall = self.wall_size();
         let items = &self.items;
-        visit_loads(items, &self.contacts, wall, self.drag, |i, load| {
+        visit_loads::<_, false>(items, &self.contacts, wall, self.drag, |i, load| {
             self.forces[i] += load.about(items[i].pos.as_dvec2());
         });
         for (item, load) in self.items.iter_mut().zip(&self.forces) {
-            let radius = item.shape.radius();
+            let air_torque = item.air_torque();
             let body = &mut item.body;
             body.pos.deriv = *body.vel;
             body.rot.deriv = *body.asp;
             body.vel.deriv = (load.force / body.mass as f64).as_vec2();
-            body.asp.deriv =
-                ((load.torque - (AIRF * radius * *body.asp) as f64) / body.inm as f64) as f32;
+            body.asp.deriv = ((load.torque + air_torque) / body.inm as f64) as f32;
         }
     }
 

@@ -36,7 +36,7 @@ fn rectangle(position: Vec2, angle: f32) -> Item<Rk4> {
     )
 }
 fn pair(a: &Item<Rk4>, b: &Item<Rk4>) -> AppliedLoad {
-    contact_pair(a, &a.contact_shape(), b, &b.contact_shape()).unwrap()
+    contact_pair::<_, false>(a, &a.contact_shape(), b, &b.contact_shape()).unwrap()
 }
 fn close(a: f64, b: f64, eps: f64) {
     assert!(
@@ -123,7 +123,7 @@ fn contact_dissipation_has_nonpositive_power() {
 fn all_walls_push_inward_and_preserve_disk_torque() {
     for normal in [Vec2::X, Vec2::NEG_X, Vec2::Y, Vec2::NEG_Y] {
         let a = disk(-0.9 * normal);
-        let result = contact_wall(&a, &a.contact_shape(), -1.0, normal).unwrap();
+        let result = contact_wall::<_, false>(&a, &a.contact_shape(), -1.0, normal).unwrap();
         assert!(result.load.force.dot(normal.as_dvec2()) > 0.0);
         close(result.load.force.dot(normal.perp().as_dvec2()), 0.0, 1e-8);
         close(result.about(a.pos.as_dvec2()).torque, 0.0, 1e-8);
@@ -163,6 +163,162 @@ fn debug_force_observation_does_not_mutate_world() {
 }
 
 #[test]
+fn debug_resultant_reproduces_force_and_torque_with_one_arrow() {
+    let mut a = rectangle(Vec2::new(-0.1, 0.05), 0.3);
+    let mut b = disk(Vec2::new(0.2, 0.1));
+    *a.vel = Vec2::new(1.0, -2.0);
+    *b.asp = 3.0;
+    let contact = contact_pair::<_, true>(&a, &a.contact_shape(), &b, &b.contact_shape()).unwrap();
+    let simulation =
+        contact_pair::<_, false>(&a, &a.contact_shape(), &b, &b.contact_shape()).unwrap();
+    assert!(contact.load.torque.abs() > 0.001);
+    for (load, expected_load) in [
+        (contact, simulation),
+        (contact.opposite(), simulation.opposite()),
+    ] {
+        let mut arrows = Vec::new();
+        load.visit_forces(0.1, |point, force| arrows.push((point, force)));
+        assert_eq!(arrows.len(), 1);
+        let (point, force) = arrows[0];
+        // Match moments about arbitrary origins, including both body centers.
+        for reference in [DVec2::ZERO, a.pos.as_dvec2(), b.pos.as_dvec2()] {
+            let expected = expected_load.about(reference);
+            close(force.x as f64, expected.force.x, 1e-6);
+            close(force.y as f64, expected.force.y, 1e-6);
+            close(
+                (point.as_dvec2() - reference).perp_dot(force.as_dvec2()),
+                expected.torque,
+                1e-6,
+            );
+        }
+    }
+    let mut forward = Vec::new();
+    let mut reverse = Vec::new();
+    contact.visit_forces(0.1, |p, f| forward.push((p, f)));
+    contact
+        .opposite()
+        .visit_forces(0.1, |p, f| reverse.push((p, f)));
+    assert_eq!(forward[0].0, reverse[0].0);
+    assert_eq!(forward[0].1, -reverse[0].1);
+}
+
+#[test]
+fn debug_unequal_circle_force_starts_in_contact_patch() {
+    for angle in [0.0, 0.8] {
+        let axis = Rot2::from_angle(angle).transform(Vec2::X);
+        let origin = Vec2::new(-0.2, 0.4);
+        let a = item(Shape::Circle { radius: 0.3 }, origin, 0.0);
+        let b = item(Shape::Circle { radius: 0.1 }, origin + 0.35 * axis, 0.0);
+        let mut points = Vec::new();
+        for (left, right) in [(&a, &b), (&b, &a)] {
+            let mut arrows = Vec::new();
+            contact_pair::<_, true>(left, &left.contact_shape(), right, &right.contact_shape())
+                .unwrap()
+                .visit_forces(0.1, |p, f| arrows.push((p, f)));
+            assert_eq!(arrows.len(), 1);
+            let (point, force) = arrows[0];
+            // The center midpoint is outside the small disk. The contact anchor
+            // must be in the overlapping lens, on the force's center line.
+            assert!((point - *a.pos).length() <= 0.3 + 1e-6);
+            assert!((point - *b.pos).length() <= 0.1 + 1e-6);
+            close((point - origin).perp_dot(axis) as f64, 0.0, 1e-6);
+            let simulation = contact_pair::<_, false>(
+                left,
+                &left.contact_shape(),
+                right,
+                &right.contact_shape(),
+            )
+            .unwrap();
+            close(force.x as f64, simulation.load.force.x, 1e-6);
+            close(force.y as f64, simulation.load.force.y, 1e-6);
+            points.push(point);
+        }
+        assert!((points[0] - points[1]).length() < 1e-6);
+    }
+}
+
+#[test]
+fn debug_wall_force_starts_at_contact_and_preserves_simulation_moment() {
+    for mut body in [
+        disk(Vec2::new(0.3, 0.9)),
+        rectangle(Vec2::new(0.3, 0.9), 0.25),
+    ] {
+        *body.vel = Vec2::new(0.7, 0.2);
+        *body.asp = 1.0;
+        let shape = body.contact_shape();
+        let display = contact_wall::<_, true>(&body, &shape, -1.0, Vec2::NEG_Y).unwrap();
+        let simulation = contact_wall::<_, false>(&body, &shape, -1.0, Vec2::NEG_Y).unwrap();
+        assert!(display.pos.y >= 1.0 && display.pos.y < 1.1);
+        let mut arrows = Vec::new();
+        display.visit_forces(0.1, |p, f| arrows.push((p, f)));
+        assert_eq!(arrows.len(), 1);
+        let (point, force) = arrows[0];
+        let expected = simulation.about(body.pos.as_dvec2());
+        close(force.x as f64, expected.force.x, 1e-6);
+        close(force.y as f64, expected.force.y, 1e-6);
+        close(
+            (point.as_dvec2() - body.pos.as_dvec2()).perp_dot(force.as_dvec2()),
+            expected.torque,
+            1e-6,
+        );
+    }
+}
+
+#[test]
+fn debug_arrows_include_the_simulations_rotational_air_drag() {
+    struct Observe(World<Rk4>);
+    impl System<Rk4> for Observe {
+        fn compute_derivs(&mut self, context: &<Rk4 as Solver>::Context) {
+            self.0.compute_derivs(context);
+            let body = &self.0.items[0];
+            let mut net = ContactLoad::default();
+            self.0.visit_forces(|p, f| {
+                net.force += f.as_dvec2();
+                net.torque += (p.as_dvec2() - body.pos.as_dvec2()).perp_dot(f.as_dvec2());
+            });
+            let expected_force = body.mass as f64 * body.vel.deriv.as_dvec2();
+            close(net.force.x, expected_force.x, 1e-6);
+            close(net.force.y, expected_force.y, 1e-6);
+            close(net.torque, body.inm as f64 * body.asp.deriv as f64, 1e-6);
+        }
+
+        fn visit_vars<V: Visitor<Rk4>>(&mut self, visitor: &mut V) {
+            self.0.visit_vars(visitor);
+        }
+    }
+    let mut world = World::<Rk4>::new(Vec2::splat(1.0));
+    let mut body = disk(Vec2::new(0.2, 0.1));
+    *body.asp = 3.0;
+    *body.vel = Vec2::new(0.4, -0.2);
+    world.insert_item(body);
+    // Check derivatives before RK4 consumes/clears them at each stage.
+    Rk4.solve_step(&mut Observe(world), 0.0);
+}
+
+#[test]
+fn debug_pure_torque_keeps_a_couple_and_zero_load_has_no_arrows() {
+    for torque in [-2.0, 0.0, 3.0] {
+        let load = AppliedLoad {
+            pos: DVec2::new(0.3, -0.7),
+            load: ContactLoad {
+                force: DVec2::ZERO,
+                torque,
+            },
+        };
+        let mut arrows = Vec::new();
+        load.visit_forces(0.1, |p, f| arrows.push((p, f)));
+        assert_eq!(arrows.len(), if torque == 0.0 { 0 } else { 2 });
+        let net_force: DVec2 = arrows.iter().map(|(_, f)| f.as_dvec2()).sum();
+        let net_torque: f64 = arrows
+            .iter()
+            .map(|(p, f)| p.as_dvec2().perp_dot(f.as_dvec2()))
+            .sum();
+        close(net_force.length(), 0.0, 1e-6);
+        close(net_torque, torque, 1e-6);
+    }
+}
+
+#[test]
 fn crowded_seed_remains_finite_at_game_timestep() {
     let mut world = World::<Rk4>::new(Vec2::splat(0.5));
     let mut rng = SmallRng::seed_from_u64(0xdeadbeef);
@@ -192,7 +348,7 @@ fn crowded_seed_remains_finite_at_game_timestep() {
 #[test]
 fn fully_submerged_body_still_has_conservative_wall_restoring_force() {
     let a = rectangle(Vec2::new(2.0, 0.0), 0.3);
-    let load = contact_wall(&a, &a.contact_shape(), -1.0, Vec2::NEG_X).unwrap();
+    let load = contact_wall::<_, false>(&a, &a.contact_shape(), -1.0, Vec2::NEG_X).unwrap();
     // Entire body is in a region where wall pressure exceeds body pressure;
     // the additional center spring supplies the gradient of 0.5*k*(x-1)^2.
     close(load.load.force.x, -WALL_RECOVERY_STIFFNESS, 1e-10);
@@ -264,7 +420,7 @@ fn sliding_ball_spins_up_and_reduces_contact_slip() {
     for _ in 0..32 {
         let body = &mut world.items[0];
         body.pos.y = 0.5 * (lower + upper);
-        let support = contact_wall(body, &body.contact_shape(), -floor_y, Vec2::NEG_Y)
+        let support = contact_wall::<_, false>(body, &body.contact_shape(), -floor_y, Vec2::NEG_Y)
             .unwrap()
             .load
             .force
@@ -451,7 +607,7 @@ fn bounds_and_prepared_domains_preserve_exhaustive_pair_loads() {
         for (j, b) in items.iter().enumerate().skip(i + 1) {
             let reference = a.pos.as_dvec2() + 0.5 * (b.pos.as_dvec2() - a.pos.as_dvec2());
             INTERFACE_CALLS.with(|count| count.set(0));
-            let actual = contact_pair(a, &shapes[i], b, &shapes[j])
+            let actual = contact_pair::<_, false>(a, &shapes[i], b, &shapes[j])
                 .map_or(ContactLoad::default(), |load| load.about(reference));
             fast_calls += INTERFACE_CALLS.with(|count| count.get());
             let mut expected = ContactLoad::default();
@@ -497,7 +653,7 @@ fn wall_bounds_preserve_every_orientation_of_pressure_contact() {
                     },
                 };
                 let reference = body.pos.as_dvec2();
-                let actual = contact_wall(&body, &shape, offset, normal)
+                let actual = contact_wall::<_, false>(&body, &shape, offset, normal)
                     .unwrap()
                     .about(reference);
                 let mut expected = ContactLoad::default();

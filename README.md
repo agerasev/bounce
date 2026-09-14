@@ -42,7 +42,12 @@ speed 0.5 and remains bounded by that pressure. These stronger defaults shorten
 bouncing and turn sliding balls toward rolling without softening the bodies
 (peak pressure remains 200). This is smooth viscous friction, with no static
 friction threshold. The elastic integral remains analytic.
-Debug arrows include equivalent force couples for independent contact torques.
+Debug view shows each nonzero contact resultant as one force on its line of
+action, preserving the simulation's integrated force and torque. Its application
+point is chosen nearest a pressure-weighted contact center, estimated with the
+same three-point quadrature used for dissipation. This anchor calculation runs
+only in debug view; it does not change the simulated load. Pure torques,
+including rotational air drag, are displayed as opposing force pairs.
 
 Walls have an inward-depth linear pressure field. A body completely submerged in
 a wall can lose its equal-pressure interface, so an additional center spring acts
