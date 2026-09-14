@@ -11,6 +11,29 @@ cargo run --locked --release
 The binary embeds its image and font, so it can run from any working directory.
 The bundled DejaVu Sans font's license is in `assets/DejaVuSans-LICENSE.txt`.
 
+## Web (WebGL2)
+
+After initializing submodules, install the build tools and generate static files:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install trunk --locked
+./scripts/build-web.sh /bounce/
+```
+
+The script produces a release build in `dist/`, including JavaScript, WebAssembly,
+and `.nojekyll` for GitHub Pages. Use the destination repository's path when
+publishing elsewhere; omit the argument for relative URLs.
+Publish the contents of `dist/` at the root of the destination's `gh-pages`
+branch and select that branch's root in GitHub Pages settings.
+
+For local development, run `NO_COLOR=true trunk serve --no-default-features
+--features web` and open the printed URL. Desktop remains the default; do not
+combine `desktop` and `web`. The browser needs WebGL2 and keyboard/mouse input;
+click the canvas to focus the controls. Refresh after Escape to restart.
+
+## Controls and simulation
+
 - Left mouse: grab an object and pull at the selected point.
 - `+` / `-`: add an object / remove a random object.
 - `\`: switch between textures and debug outlines with force arrows.

@@ -3,6 +3,11 @@ name = "bounce"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["desktop"]
+desktop = ["wgame/desktop"]
+web = ["wgame/web"]
+
 [dependencies]
 derive_more = { version = "2.1.1", features = ["deref", "deref_mut"] }
 glam = { version = "0.32.0", features = ["rand"] }
@@ -15,4 +20,8 @@ rand = { version = "0.9.2", default-features = false, features = [
 ] }
 rand_distr = "0.5.1"
 rgb = "0.8.52"
-wgame = { path = "wgame/wgame" }
+wgame = { path = "wgame/wgame", default-features = false, features = [
+    "shapes",
+    "image",
+    "typography",
+] }
