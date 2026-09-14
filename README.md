@@ -9,6 +9,8 @@ cargo run --locked --release
 ```
 
 The binary embeds its image and font, so it can run from any working directory.
+The playground and header use logical pixels and follow desktop scaling; font
+rasters refresh when display scaling changes.
 The bundled DejaVu Sans font's license is in `assets/DejaVuSans-LICENSE.txt`.
 
 ## Web (WebGL2)

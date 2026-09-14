@@ -22,6 +22,7 @@ use wgame::{
 const SEED: u64 = 0xdeadbeef;
 const SCALE: f32 = 640.0;
 const HEADER_HEIGHT: f32 = 64.0;
+const FONT_SIZE: f32 = 18.0;
 const STEP: Duration = Duration::from_nanos(4_166_667);
 const MAX_STEPS: u32 = 24;
 
@@ -34,7 +35,7 @@ fn reset(size: Vec2, rng: &mut SmallRng) -> World<Rk4> {
     world
 }
 
-#[wgame::window(title = "Bounce", size = (1200, 900), resizable = true, vsync = true)]
+#[wgame::window(title = "Bounce", logical_size = (1200.0, 900.0), resizable = true, vsync = true)]
 async fn main(mut window: Window<'_>) -> Result<()> {
     let gfx = Library::new(window.graphics());
     // Asset generation has its own RNG so changing a texture cannot change reset.
@@ -43,8 +44,9 @@ async fn main(mut window: Window<'_>) -> Result<()> {
         wgame::typography::FontData::new(include_bytes!("../assets/DejaVuSans.ttf").to_vec(), 0)
             .map_err(|err| err.context("cannot decode embedded DejaVuSans.ttf"))?;
     let font = gfx.make_font(&font_data);
-    let raster = font.rasterize(18.0);
-    let help = raster.text("+/-: add/remove   Drag: left mouse   Esc: quit");
+    let mut scale_factor = window.scale_factor();
+    let mut raster = font.rasterize(FONT_SIZE * scale_factor as f32);
+    let mut help = raster.text("+/-: add/remove   Drag: left mouse   Esc: quit");
     let mut status = raster.text("");
     let mut previous_status = String::new();
     let mut rng = SmallRng::seed_from_u64(SEED);
@@ -61,19 +63,28 @@ async fn main(mut window: Window<'_>) -> Result<()> {
 
     'frames: while let Some(mut frame) = window.next_frame().await? {
         let size = frame.size();
-        let viewport = Vec2::new(size.0 as f32, size.1 as f32);
+        let logical_size = frame.logical_size();
+        let viewport = Vec2::new(logical_size.0 as f32, logical_size.1 as f32);
+        let scale_changed = frame.scale_factor() != scale_factor;
+        if scale_changed {
+            scale_factor = frame.scale_factor();
+            raster = font.rasterize(FONT_SIZE * scale_factor as f32);
+            help = raster.text(help.text());
+            previous_status.clear();
+        }
         // The HUD occupies its own strip above the simulation's viewport.
         let header_height = HEADER_HEIGHT.min(viewport.y);
         let playground = Vec2::new(viewport.x, viewport.y - header_height);
         let playground_origin = Vec2::new(0.0, header_height);
         let mut reset_clock = false;
         let world = world.get_or_insert_with(|| reset(playground / SCALE, &mut rng));
-        if frame.resized().is_some() {
+        if frame.resized().is_some() || scale_changed {
+            world.drag_release();
             world.resize(playground / SCALE);
             reset_clock = true;
         }
         let camera = frame
-            .physical_camera()
+            .logical_camera()
             .transform(Affine2::from_scale_angle_translation(
                 Vec2::splat(0.5 * SCALE),
                 0.0,
@@ -124,7 +135,9 @@ async fn main(mut window: Window<'_>) -> Result<()> {
                 } => match state {
                     ElementState::Pressed => {
                         if let Some(pos) = mouse
-                            .filter(|pos: &Vec2| pos.y >= header_height && playground.y > 0.0)
+                            .filter(|pos: &Vec2| {
+                                pos.y >= header_height * scale_factor as f32 && playground.y > 0.0
+                            })
                             .and_then(|pos| camera.screen_to_world(pos, size))
                         {
                             world.drag_acquire(pos);
@@ -135,7 +148,7 @@ async fn main(mut window: Window<'_>) -> Result<()> {
                 Event::CursorMoved { position, .. } => {
                     let pixel = Vec2::new(position.x as f32, position.y as f32);
                     mouse = Some(pixel);
-                    if pixel.y < header_height {
+                    if pixel.y < header_height * scale_factor as f32 {
                         world.drag_release();
                     } else if let Some(pos) = camera.screen_to_world(pixel, size) {
                         world.drag_move(pos);
@@ -196,7 +209,7 @@ async fn main(mut window: Window<'_>) -> Result<()> {
             status = raster.text(&label);
             previous_status = label;
         }
-        let camera = frame.physical_camera();
+        let camera = frame.logical_camera();
         let mut overlay = frame.scene();
         overlay.camera = camera;
         overlay.add(
@@ -204,8 +217,8 @@ async fn main(mut window: Window<'_>) -> Result<()> {
                 .rectangle((Vec2::ZERO, Vec2::new(viewport.x, header_height)))
                 .fill_color(color::BLACK),
         );
-        overlay.add(&status.scale(raster.size()).move_to(Vec2::new(12.0, 24.0)));
-        overlay.add(&help.scale(raster.size()).move_to(Vec2::new(12.0, 49.0)));
+        overlay.add(&status.scale(FONT_SIZE).move_to(Vec2::new(12.0, 24.0)));
+        overlay.add(&help.scale(FONT_SIZE).move_to(Vec2::new(12.0, 49.0)));
         overlay.render();
         frame.present();
     }
