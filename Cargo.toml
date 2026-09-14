@@ -5,8 +5,8 @@ edition = "2024"
 
 [features]
 default = ["desktop"]
-desktop = ["wgame/desktop"]
-web = ["wgame/web"]
+desktop = ["wgame/desktop", "wgame-egui/desktop"]
+web = ["wgame/web", "wgame-egui/web"]
 
 [dependencies]
 derive_more = { version = "2.1.1", features = ["deref", "deref_mut"] }
@@ -20,5 +20,6 @@ rgb = "0.8.53"
 wgame = { path = "wgame/wgame", default-features = false, features = [
     "shapes",
     "image",
-    "typography",
 ] }
+
+wgame-egui = { path = "wgame/wgame-egui", default-features = false }

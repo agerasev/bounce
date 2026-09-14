@@ -1,31 +1,25 @@
-//! Interactive controls are listed in the window and README. Simulation uses a
-//! 240 Hz fixed RK4 step. Catch-up is capped at 24 steps per frame (100 ms);
-//! excess elapsed time is discarded after stalls, rather than increasing dt.
-//! Pause, focus loss, reset and speed changes discard accumulated time.
-use std::time::Duration;
-
+//! Simulation uses a 240 Hz fixed RK4 step, capped at 24 catch-up steps per frame.
+//! The host owns layout/input/presentation; controls communicate through actions.
+mod controls;
+mod ui;
 use bounce::{DrawMode, TextureStorage, World, sample_item};
+use controls::{Action, Controls};
 use glam::{Affine2, Vec2};
 use phy::{Rk4, Solver};
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 use wgame::{
-    Event, Library, Result, Window,
+    Library, Result, Window, WindowHost,
     app::time::Instant,
+    canvas::{Button, Event, Key},
     gfx::types::{Color, color},
-    input::{
-        event::{ElementState, MouseButton},
-        keyboard::{KeyCode, PhysicalKey},
-    },
     prelude::*,
 };
 
 const SEED: u64 = 0xdeadbeef;
 const SCALE: f32 = 640.0;
-const HEADER_HEIGHT: f32 = 64.0;
-const FONT_SIZE: f32 = 18.0;
 const STEP: Duration = Duration::from_nanos(4_166_667);
 const MAX_STEPS: u32 = 24;
-
 fn reset(size: Vec2, rng: &mut SmallRng) -> World<Rk4> {
     *rng = SmallRng::seed_from_u64(SEED);
     let mut world = World::new(size);
@@ -36,142 +30,128 @@ fn reset(size: Vec2, rng: &mut SmallRng) -> World<Rk4> {
 }
 
 #[wgame::window(title = "Bounce", logical_size = (1200.0, 900.0), resizable = true, vsync = true)]
-async fn main(mut window: Window<'_>) -> Result<()> {
-    let gfx = Library::new(window.graphics());
-    // Asset generation has its own RNG so changing a texture cannot change reset.
+async fn main(window: Window<'_>) -> Result<()> {
+    let controls = Rc::new(RefCell::new(Controls::default()));
+    let ui_controls = controls.clone();
+    let host = wgame_egui::EguiWindow::new(window, move |ui, canvas| {
+        ui::layout(ui, canvas, &mut ui_controls.borrow_mut())
+    });
+    run(host, controls).await
+}
+
+async fn run(mut host: impl WindowHost, shared: Rc<RefCell<Controls>>) -> Result<()> {
+    let gfx = Library::new(host.graphics());
+    // Asset generation cannot change the simulation's reset sequence.
     let textures = TextureStorage::new(&mut SmallRng::seed_from_u64(SEED), &gfx)?;
-    let font_data =
-        wgame::typography::FontData::new(include_bytes!("../assets/DejaVuSans.ttf").to_vec(), 0)
-            .map_err(|err| err.context("cannot decode embedded DejaVuSans.ttf"))?;
-    let font = gfx.make_font(&font_data);
-    let mut scale_factor = window.scale_factor();
-    let mut raster = font.rasterize(FONT_SIZE * scale_factor as f32);
-    let mut help = raster.text("+/-: add/remove   Drag: left mouse   Esc: quit");
-    let mut status = raster.text("");
-    let mut previous_status = String::new();
     let mut rng = SmallRng::seed_from_u64(SEED);
     let mut world = None;
-    let mut mode = DrawMode::Normal;
-    let mut paused = false;
-    let mut slow = false;
-    let mut focused = true;
-    let mut events = window.input();
-    // Keep physical coordinates so a stationary cursor remains valid after resize.
-    let mut mouse = None;
     let mut last = Instant::now();
     let mut accumulated = Duration::ZERO;
-
-    'frames: while let Some(mut frame) = window.next_frame().await? {
-        let size = frame.size();
+    let mut previous_size = Vec2::ZERO;
+    'frames: while let Some(mut frame) = host.next_frame().await? {
+        let mut controls = shared.borrow_mut();
         let logical_size = frame.logical_size();
-        let viewport = Vec2::new(logical_size.0 as f32, logical_size.1 as f32);
-        let scale_changed = frame.scale_factor() != scale_factor;
-        if scale_changed {
-            scale_factor = frame.scale_factor();
-            raster = font.rasterize(FONT_SIZE * scale_factor as f32);
-            help = raster.text(help.text());
-            previous_status.clear();
-        }
-        // The HUD occupies its own strip above the simulation's viewport.
-        let header_height = HEADER_HEIGHT.min(viewport.y);
-        let playground = Vec2::new(viewport.x, viewport.y - header_height);
-        let playground_origin = Vec2::new(0.0, header_height);
-        let mut reset_clock = false;
+        let playground = Vec2::new(logical_size.0 as f32, logical_size.1 as f32);
         let world = world.get_or_insert_with(|| reset(playground / SCALE, &mut rng));
-        if frame.resized().is_some() || scale_changed {
+        let mut reset_clock = playground != previous_size;
+        if reset_clock && frame.visible() {
             world.drag_release();
             world.resize(playground / SCALE);
-            reset_clock = true;
+            previous_size = playground;
         }
         let camera = frame
             .logical_camera()
             .transform(Affine2::from_scale_angle_translation(
                 Vec2::splat(0.5 * SCALE),
                 0.0,
-                playground_origin + 0.5 * playground,
+                0.5 * playground,
             ));
-        while let Some(event) = events.try_next() {
-            match event {
-                Event::KeyboardInput { event, .. } if event.state.is_pressed() && !event.repeat => {
-                    if let PhysicalKey::Code(key) = event.physical_key {
-                        match key {
-                            KeyCode::Escape => {
-                                frame.discard();
-                                break 'frames;
-                            }
-                            KeyCode::Equal | KeyCode::NumpadAdd => {
-                                world.insert_item(sample_item(&mut rng, world.wall_size()))
-                            }
-                            KeyCode::Minus | KeyCode::NumpadSubtract if world.n_items() > 0 => {
-                                world.remove_item(rng.random_range(0..world.n_items()));
-                            }
-                            KeyCode::Backslash => {
-                                mode = if mode == DrawMode::Normal {
-                                    DrawMode::Debug
-                                } else {
-                                    DrawMode::Normal
-                                }
-                            }
-                            KeyCode::Space => {
-                                paused = !paused;
-                                reset_clock = true;
-                            }
-                            KeyCode::KeyS => {
-                                slow = !slow;
-                                reset_clock = true;
-                            }
-                            KeyCode::KeyR => {
-                                *world = reset(playground / SCALE, &mut rng);
-                                reset_clock = true;
-                            }
-                            _ => (),
+        let world_point =
+            |position| camera.screen_to_world(position * frame.scale_factor() as f32, frame.size());
+        for event in &frame.input().events {
+            match *event {
+                Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                } => {
+                    let action = match key {
+                        Key::Escape => {
+                            drop(controls);
+                            frame.discard();
+                            break 'frames;
                         }
+                        Key::Plus => Some(Action::Add),
+                        Key::Minus => Some(Action::Remove),
+                        Key::Character('\\') => Some(Action::Mode),
+                        Key::Space => Some(Action::Pause),
+                        Key::Character('s') => Some(Action::Slow),
+                        Key::Character('r') => Some(Action::Reset),
+                        _ => None,
+                    };
+                    if let Some(action) = action {
+                        controls.actions.push(action);
                     }
                 }
-                Event::MouseInput {
-                    state,
-                    button: MouseButton::Left,
-                    ..
-                } => match state {
-                    ElementState::Pressed => {
-                        if let Some(pos) = mouse
-                            .filter(|pos: &Vec2| {
-                                pos.y >= header_height * scale_factor as f32 && playground.y > 0.0
-                            })
-                            .and_then(|pos| camera.screen_to_world(pos, size))
-                        {
+                Event::Button {
+                    button: Button::Primary,
+                    pressed,
+                    position,
+                } => {
+                    if pressed {
+                        if let Some(pos) = world_point(position) {
                             world.drag_acquire(pos);
                         }
-                    }
-                    ElementState::Released => world.drag_release(),
-                },
-                Event::CursorMoved { position, .. } => {
-                    let pixel = Vec2::new(position.x as f32, position.y as f32);
-                    mouse = Some(pixel);
-                    if pixel.y < header_height * scale_factor as f32 {
+                    } else {
                         world.drag_release();
-                    } else if let Some(pos) = camera.screen_to_world(pixel, size) {
+                    }
+                }
+                Event::Moved(position) => {
+                    if let Some(pos) = world_point(position) {
                         world.drag_move(pos);
                     }
                 }
-                Event::CursorLeft { .. } => {
-                    world.drag_release();
-                    mouse = None;
-                }
-                Event::Focused(value) => {
-                    focused = value;
+                Event::Cancelled | Event::Focused(_) => {
                     world.drag_release();
                     reset_clock = true;
                 }
-                _ => (),
+                _ => {}
+            }
+        }
+        for action in std::mem::take(&mut controls.actions) {
+            match action {
+                Action::Add => world.insert_item(sample_item(&mut rng, world.wall_size())),
+                Action::Remove if world.n_items() > 0 => {
+                    world.remove_item(rng.random_range(0..world.n_items()));
+                }
+                Action::Mode => {
+                    controls.mode = if controls.mode == DrawMode::Normal {
+                        DrawMode::Debug
+                    } else {
+                        DrawMode::Normal
+                    }
+                }
+                Action::Pause => {
+                    controls.paused = !controls.paused;
+                    reset_clock = true;
+                }
+                Action::Slow => {
+                    controls.slow = !controls.slow;
+                    reset_clock = true;
+                }
+                Action::Reset => {
+                    *world = reset(playground / SCALE, &mut rng);
+                    reset_clock = true;
+                }
+                _ => {}
             }
         }
         let now = Instant::now();
-        if reset_clock || paused || !focused || playground.y == 0.0 {
+        if reset_clock || controls.paused || !frame.input().window_focused || !frame.visible() {
             accumulated = Duration::ZERO;
         } else {
             let elapsed = (now - last).min(STEP * MAX_STEPS);
-            accumulated += if slow { elapsed / 10 } else { elapsed };
+            accumulated += if controls.slow { elapsed / 10 } else { elapsed };
             for _ in 0..MAX_STEPS {
                 if accumulated < STEP {
                     break;
@@ -181,45 +161,20 @@ async fn main(mut window: Window<'_>) -> Result<()> {
             }
         }
         last = now;
-        frame.clear(if mode == DrawMode::Normal {
+        controls.bodies = world.n_items();
+        frame.clear(if controls.mode == DrawMode::Normal {
             color::BLACK.mix(color::WHITE, 0.5)
         } else {
             color::BLACK.to_rgba()
         });
+        let visible = frame.visible();
         let mut scene = frame.scene();
         scene.camera = camera;
-        if playground.y > 0.0 {
-            world.draw(&gfx, &textures, &mut scene, mode);
+        if visible {
+            world.draw(&gfx, &textures, &mut scene, controls.mode);
         }
         scene.render();
-
-        let label = format!(
-            "{} bodies | Space: {} | S: {} | \\: {} | R: reset{}",
-            world.n_items(),
-            if paused { "resume" } else { "pause" },
-            if slow { "normal speed" } else { "slow motion" },
-            if mode == DrawMode::Normal {
-                "debug"
-            } else {
-                "normal"
-            },
-            if focused { "" } else { " | unfocused" }
-        );
-        if label != previous_status {
-            status = raster.text(&label);
-            previous_status = label;
-        }
-        let camera = frame.logical_camera();
-        let mut overlay = frame.scene();
-        overlay.camera = camera;
-        overlay.add(
-            &gfx.shapes()
-                .rectangle((Vec2::ZERO, Vec2::new(viewport.x, header_height)))
-                .fill_color(color::BLACK),
-        );
-        overlay.add(&status.scale(FONT_SIZE).move_to(Vec2::new(12.0, 24.0)));
-        overlay.add(&help.scale(FONT_SIZE).move_to(Vec2::new(12.0, 49.0)));
-        overlay.render();
+        drop(controls);
         frame.present();
     }
     Ok(())

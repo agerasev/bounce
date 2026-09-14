@@ -8,10 +8,10 @@ git submodule update --init --recursive
 cargo run --locked --release
 ```
 
-The binary embeds its image and font, so it can run from any working directory.
-The playground and header use logical pixels and follow desktop scaling; font
-rasters refresh when display scaling changes.
-The bundled DejaVu Sans font's license is in `assets/DejaVuSans-LICENSE.txt`.
+The binary embeds its images and uses egui's bundled fonts, so it runs from any
+working directory. The toolbar reserves its own space above the playground;
+both follow display scaling. Controls are defined in `src/ui.rs`, while the
+playground loop uses wgame's host-neutral frame and canvas input API.
 
 ## Web (WebGL2)
 
@@ -31,20 +31,23 @@ branch and select that branch's root in GitHub Pages settings.
 
 For local development, run `NO_COLOR=true trunk serve --no-default-features
 --features web` and open the printed URL. Desktop remains the default; do not
-combine `desktop` and `web`. The browser needs WebGL2 and keyboard/mouse input;
-click the canvas to focus the controls. Refresh after Escape to restart.
+combine `desktop` and `web`. The browser needs WebGL2. Mouse and touch dragging are supported;
+click the playground to focus keyboard shortcuts. Refresh after Escape to restart.
 
 ## Controls and simulation
 
-- Left mouse: grab an object and pull at the selected point.
+- Left mouse or one-finger touch: grab an object and pull at the selected point.
+- Toolbar buttons provide the same actions as the shortcuts below. Click the
+  playground to give it keyboard focus after using a UI control.
 - `+` / `-`: add an object / remove a random object.
 - `\`: switch between textures and debug outlines with force arrows.
 - Space: pause or resume. `S`: toggle one-tenth speed independently of debug mode.
 - `R`: reset eight objects using the same seed, preserving pause and speed settings.
 - Escape or close the window: quit.
 
-Losing focus pauses simulation; cursor exit, moving into the text header, focus
-changes, resizing, and removing the grabbed object release the drag. Reset is
+Losing window focus pauses simulation. Pointer cancellation, focus or layout
+changes, and removing the grabbed object release the drag. Drags retain capture
+when moving over the toolbar and end on release. Reset is
 reproducible at the same window size. The stepping and catch-up policy lives in `src/main.rs`.
 
 Contacts use quadratic radial pressure fields for circles and a continuous

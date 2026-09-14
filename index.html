@@ -9,10 +9,9 @@
     #content { width: 100%; height: 100%; contain: size; }
     /* Override winit's initial inline pixel size; its ResizeObserver updates
        the drawing buffer when this viewport-sized layout changes. */
-    canvas { display: block; width: 100% !important; height: 100% !important; outline: none; }
+    canvas { display: block; width: 100% !important; height: 100% !important; outline: none; touch-action: none; }
   </style>
   <link data-trunk rel="rust" data-bin="bounce" />
-  <link data-trunk rel="copy-file" href="assets/DejaVuSans-LICENSE.txt" />
 </head>
 <body>
   <div id="content"><canvas id="canvas" tabindex="0" aria-label="Bounce rigid-body playground"></canvas></div>
