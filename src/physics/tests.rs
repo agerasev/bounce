@@ -1,7 +1,7 @@
 use super::*;
 use crate::sample_item;
 use phy::{Rk4, Solver};
-use rand::{Rng, SeedableRng, rngs::SmallRng};
+use rand::{RngExt, SeedableRng, rngs::SmallRng};
 use rgb::Rgb;
 
 thread_local! {

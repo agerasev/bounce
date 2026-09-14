@@ -8,7 +8,7 @@ use glam::Vec2;
 use hsl::HSL;
 use phy::{Rot2, Solver, Var};
 use physics::{Body, Shape};
-use rand::Rng;
+use rand::{Rng, RngExt};
 use rand_distr::Uniform;
 pub use render::{DrawMode, TextureStorage};
 use rgb::Rgb;

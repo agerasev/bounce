@@ -10,16 +10,13 @@ web = ["wgame/web"]
 
 [dependencies]
 derive_more = { version = "2.1.1", features = ["deref", "deref_mut"] }
-glam = { version = "0.32.0", features = ["rand"] }
+glam = { version = "0.33.7", features = ["rand"] }
 hsl = "0.1.1"
 phy = { path = "phy" }
 geom2 = { path = "geom2" }
-rand = { version = "0.9.2", default-features = false, features = [
-    "std",
-    "small_rng",
-] }
-rand_distr = "0.5.1"
-rgb = "0.8.52"
+rand = { version = "0.10.2", default-features = false, features = ["std"] }
+rand_distr = "0.6.0"
+rgb = "0.8.53"
 wgame = { path = "wgame/wgame", default-features = false, features = [
     "shapes",
     "image",

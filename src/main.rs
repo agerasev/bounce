@@ -7,7 +7,7 @@ use std::time::Duration;
 use bounce::{DrawMode, TextureStorage, World, sample_item};
 use glam::{Affine2, Vec2};
 use phy::{Rk4, Solver};
-use rand::{Rng, SeedableRng, rngs::SmallRng};
+use rand::{RngExt, SeedableRng, rngs::SmallRng};
 use wgame::{
     Event, Library, Result, Window,
     app::time::Instant,

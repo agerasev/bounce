@@ -2,7 +2,7 @@
 use crate::{World, physics::Shape};
 use glam::{Affine2, Vec2, Vec4, Vec4Swizzles};
 use phy::Solver;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use rand_distr::Uniform;
 use rgb::Rgb;
 use wgame::{
