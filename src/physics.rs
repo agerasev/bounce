@@ -156,6 +156,8 @@ pub(crate) struct ContactShape {
 }
 
 #[derive(Clone, Debug)]
+// Keep cells inline to avoid allocating for every body at every RK4 stage.
+#[expect(clippy::large_enum_variant)]
 enum ContactCells {
     Disk(ContactCell<Disk, 1>),
     Rectangle([Triangle; 4]),
