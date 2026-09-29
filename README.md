@@ -4,7 +4,6 @@ An interactive rigid-body playground using `wgame` for rendering, `phy` for RK4
 integration, and `geom2` for pressure-field contact geometry.
 
 ```sh
-git submodule update --init --recursive
 cargo run --locked --release
 ```
 
@@ -15,7 +14,7 @@ playground loop uses wgame's host-neutral frame and canvas input API.
 
 ## Web (WebGL2)
 
-After initializing submodules, install the build tools and generate static files:
+Install the build tools and generate static files:
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -126,3 +125,23 @@ cannot remove real contacts in a dense overlap. In particular, the packed
 benchmark still exceeds the CPU budget for real-time 240 Hz stepping on this
 machine. A spatial grid or sweep would address pair enumeration for larger sparse
 scenes; heavily overlapping scenes remain dominated by contact calculations.
+
+## Local library development
+
+Normal builds use the crates.io releases recorded in `Cargo.lock`. To work on
+the libraries alongside this game, check out `../wgame`, `../phy` and `../geom2`
+and opt in from this repository's root:
+
+```sh
+cargo run --config .cargo/local-libs.toml --release
+```
+
+The patches in [`.cargo/local-libs.toml`](.cargo/local-libs.toml) select the sibling
+checkouts, including wgame's internal workspace dependencies. Local package
+versions must still satisfy `Cargo.toml`. Local builds update `Cargo.lock`; keep
+those changes out of release commits and restore the committed lockfile when
+returning to registry builds.
+
+For repeated local builds or Trunk, copy that file to the ignored
+`.cargo/config.toml` and run `cargo check` once to update the local lockfile. Remove
+that config and restore the committed lockfile to use the published versions again.

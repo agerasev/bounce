@@ -1,3 +1,9 @@
 /target
 /dist
 /.vscode
+
+# Local dependency checkouts and Cargo overrides.
+/.cargo/config.toml
+/wgame
+/phy
+/geom2

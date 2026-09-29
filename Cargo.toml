@@ -12,14 +12,14 @@ web = ["wgame/web", "wgame-egui/web"]
 derive_more = { version = "2.1.1", features = ["deref", "deref_mut"] }
 glam = { version = "0.33.7", features = ["rand"] }
 hsl = "0.1.1"
-phy = { path = "phy" }
-geom2 = { path = "geom2" }
+phy = "0.2.0"
+geom2 = "0.1.0"
 rand = { version = "0.10.2", default-features = false, features = ["std"] }
 rand_distr = "0.6.0"
 rgb = "0.8.53"
-wgame = { path = "wgame/wgame", default-features = false, features = [
+wgame = { version = "0.1.0", default-features = false, features = [
     "shapes",
     "image",
 ] }
 
-wgame-egui = { path = "wgame/wgame-egui", default-features = false }
+wgame-egui = { version = "0.1.0", default-features = false }
