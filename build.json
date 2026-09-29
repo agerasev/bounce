@@ -1,5 +1,13 @@
 {
-  "source_commit": "83e461c02b076be58fbd68c9467e011b1c5e9849",
+  "source_commit": "6f2383a24de4f56aac9289067b5ec9dc549c9422",
   "source_branch": "main",
-  "public_url": "/bounce/"
+  "public_url": "/bounce/",
+  "library_versions": {
+    "geom2": "0.1.0",
+    "phy": "0.2.0",
+    "wgame": "0.1.0",
+    "wgame-egui": "0.1.0"
+  },
+  "built_at": "2026-09-29T09:18:25.491133+00:00",
+  "build_command": "./scripts/build-web.sh /bounce/"
 }
